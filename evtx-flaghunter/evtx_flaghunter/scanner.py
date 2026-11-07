@@ -233,6 +233,15 @@ class Scanner:
         config = self.config
         xml = record.xml
 
+        if config.eid_match:
+            # Quick-query mode: the event ID filter IS the match criterion,
+            # so every pre-filtered record is emitted as a hit.
+            pos = _first_eventdata_pos(xml)
+            return self._build_hit(
+                record, matcher, [f"eid:{record.event_id}"], "plain", [],
+                pos=pos,
+            )
+
         keywords = matcher.matched_keywords(xml)
         regex_hits = matcher.find_regex(xml)
         decoded_spans: list[dec.DecodedSpan] = []
@@ -266,11 +275,17 @@ class Scanner:
         keywords: list[str],
         layer: str,
         decoded_spans: list[dec.DecodedSpan],
+        pos: int | None = None,
     ) -> RecordHit:
-        """Assemble a :class:`RecordHit` from a matching record."""
+        """Assemble a :class:`RecordHit` from a matching record.
+
+        ``pos`` optionally overrides the auto-detected match offset (used by
+        quick-query mode to point the context at the EventData section).
+        """
         config = self.config
         xml = record.xml
-        pos = _match_position(matcher, xml)
+        if pos is None:
+            pos = _match_position(matcher, xml)
         context = _context_snippet(xml, pos, config.context)
 
         extracted = ""

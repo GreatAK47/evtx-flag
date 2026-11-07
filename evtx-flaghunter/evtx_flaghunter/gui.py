@@ -1,15 +1,16 @@
 """Graphical interface - the primary interaction form (design doc 4.2).
 
-Single window, three zones:
+Notebook layout with two tabs:
 
-* top bar    - import buttons, preset selector, one-click scan
-* left panel - all options exposed as widgets (zero typing required)
-* right side - file list, result table, record detail viewer
-* status bar - progress + summary + export
+* ``Flag 检索`` tab   - the original CTF flag keyword hunt: option panel,
+  file list, result table and record detail viewer.
+* ``日志快速查找`` tab - one-click incident-response extractions (RDP
+  logins, scheduled task changes, log clearing, ...) driven by the shared
+  :mod:`evtx_flaghunter.quick_queries` registry.
 
-Drag & drop of files / folders / zip archives is enabled through
-``tkinterdnd2`` when available; buttons and path paste always work as
-fallbacks (design doc 4.3.1).
+Both tabs share the imported file list (top bar / drag & drop) and the
+bottom status bar. Only one scan runs at a time; scanner events are routed
+to whichever tab started the scan.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from evtx_flaghunter import exporter
 from evtx_flaghunter.detect import detect_file
 from evtx_flaghunter.model import FileEntry, RecordHit, ScanConfig
 from evtx_flaghunter.presets import PRESETS
+from evtx_flaghunter.quick_queries import QUICK_QUERIES, QuickQuery
 from evtx_flaghunter.scanner import (
     EV_DONE,
     EV_ERROR,
@@ -46,19 +48,26 @@ except ImportError:  # pragma: no cover - exercised on slim installs
     TkinterDnD = None  # type: ignore[assignment]
     _HAS_DND = False
 
+_TAB_FLAG = "flag"
+_TAB_QUICK = "quick"
+
 
 class FlagHunterApp:
-    """Main application window."""
+    """Main application window (two-tab notebook)."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.entries: list[FileEntry] = []
-        self.hits: list[RecordHit] = []
+        self.hits: list[RecordHit] = []  # flag tab results
+        self.quick_hits: list[RecordHit] = []  # quick tab results
         self._events: Any = None
         self._scanning = False
+        self._scan_kind = _TAB_FLAG  # routes events to the owning tab
         self._temp_dirs: list[str] = []
         self._build_ui()
-        if _HAS_DND:
+        # Only a TkinterDnD-enabled root supports drop targets; a plain
+        # tk.Tk (e.g. in tests) must degrade gracefully to buttons/paste.
+        if _HAS_DND and hasattr(root, "drop_target_register"):
             root.drop_target_register(DND_FILES)
             root.dnd_bind("<<Drop>>", self._on_drop)
 
@@ -70,6 +79,7 @@ class FlagHunterApp:
         self.root.geometry("1100x720")
         self.root.minsize(900, 600)
 
+        # Top bar: shared import + flag preset + flag scan trigger ---------
         top = ttk.Frame(self.root, padding=6)
         top.pack(fill=tk.X)
         ttk.Button(top, text="添加文件", command=self._add_files).pack(side=tk.LEFT)
@@ -86,11 +96,31 @@ class FlagHunterApp:
             state="readonly",
         ).pack(side=tk.LEFT)
         self.scan_btn = ttk.Button(
-            top, text="\u25b6 开始检索", command=self._start_scan
+            top, text="\u25b6 开始Flag检索", command=self._start_scan
         )
         self.scan_btn.pack(side=tk.LEFT, padx=12)
 
-        body = ttk.Frame(self.root)
+        # Tabs --------------------------------------------------------------
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self._build_flag_tab()
+        self._build_quick_tab()
+
+        # Status bar (shared by both tabs) ----------------------------------
+        status = ttk.Frame(self.root, padding=4)
+        status.pack(fill=tk.X)
+        self.progress = ttk.Progressbar(status, mode="determinate", length=260)
+        self.progress.pack(side=tk.LEFT)
+        self.status_var = tk.StringVar(value="拖入 .evtx 文件或文件夹开始")
+        ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT, padx=8)
+
+    # -- flag tab ----------------------------------------------------------
+
+    def _build_flag_tab(self) -> None:
+        """Original keyword-hunt layout: options + files/results/detail."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Flag 检索")
+        body = ttk.Frame(tab)
         body.pack(fill=tk.BOTH, expand=True)
 
         # Left options panel --------------------------------------------
@@ -126,7 +156,7 @@ class FlagHunterApp:
         self.ent_extract.pack(fill=tk.X, pady=2)
 
         ttk.Separator(left).pack(fill=tk.X, pady=6)
-        ttk.Label(left, text="事件ID 过滤:").pack(anchor=tk.W)
+        ttk.Label(left, text="事件ID 过滤 (预过滤):").pack(anchor=tk.W)
         self.ent_eid = ttk.Entry(left, width=28)
         self.ent_eid.pack(fill=tk.X, pady=2)
         ttk.Label(left, text="时间范围 since (UTC):").pack(anchor=tk.W, pady=(6, 0))
@@ -194,29 +224,123 @@ class FlagHunterApp:
         ttk.Button(btns, text="复制完整记录", command=self._copy_content).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(btns, text="导出 JSON", command=lambda: self._export("json")).pack(
+        ttk.Button(btns, text="导出 JSON", command=lambda: self._export(_TAB_FLAG, "json")).pack(
             side=tk.RIGHT
         )
-        ttk.Button(btns, text="导出 CSV", command=lambda: self._export("csv")).pack(
+        ttk.Button(btns, text="导出 CSV", command=lambda: self._export(_TAB_FLAG, "csv")).pack(
             side=tk.RIGHT, padx=4
         )
-        self.detail = tk.Text(
-            detail_frame, height=8, wrap=tk.NONE, state=tk.DISABLED,
-            font=("Consolas", 9),
-        )
-        ysb = ttk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=self.detail.yview)
-        self.detail.configure(yscrollcommand=ysb.set)
-        self.detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.detail = self._make_detail_text(detail_frame)
         right.add(detail_frame, weight=3)
 
-        # Status bar -------------------------------------------------------
-        status = ttk.Frame(self.root, padding=4)
-        status.pack(fill=tk.X)
-        self.progress = ttk.Progressbar(status, mode="determinate", length=260)
-        self.progress.pack(side=tk.LEFT)
-        self.status_var = tk.StringVar(value="拖入 .evtx 文件或文件夹开始")
-        ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT, padx=8)
+    # -- quick query tab ---------------------------------------------------
+
+    def _build_quick_tab(self) -> None:
+        """One-click incident-response extraction tab."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="日志快速查找 (未完工·慎用)")
+        body = ttk.Frame(tab)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # Left: scenario picker -------------------------------------------
+        left = ttk.LabelFrame(body, text="快速查询场景 (一键提取)", padding=8)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
+
+        self._quick_map: dict[str, QuickQuery] = {
+            f"{q.label} ({q.name})": q for q in QUICK_QUERIES.values()
+        }
+        choices = list(self._quick_map)
+        self.quick_var = tk.StringVar(value=choices[0])
+        combo = ttk.Combobox(
+            left,
+            textvariable=self.quick_var,
+            values=choices,
+            width=28,
+            state="readonly",
+        )
+        combo.pack(fill=tk.X, pady=2)
+        combo.bind("<<ComboboxSelected>>", self._on_quick_selected)
+
+        self.quick_desc_var = tk.StringVar()
+        ttk.Label(
+            left, textvariable=self.quick_desc_var, wraplength=200,
+            foreground="#555555", justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=4)
+        self._on_quick_selected()
+
+        ttk.Separator(left).pack(fill=tk.X, pady=6)
+        ttk.Label(left, text="补充事件ID (可选, 空格分隔):").pack(anchor=tk.W)
+        self.q_ent_eid = ttk.Entry(left, width=28)
+        self.q_ent_eid.pack(fill=tk.X, pady=2)
+        ttk.Label(left, text="最多输出条数:").pack(anchor=tk.W, pady=(6, 0))
+        self.q_ent_top = ttk.Spinbox(left, from_=0, to=100000, width=10)
+        self.q_ent_top.set(0)
+        self.q_ent_top.pack(anchor=tk.W, pady=2)
+
+        self.quick_btn = ttk.Button(
+            left, text="\u26a1 一键提取", command=self._run_quick_query
+        )
+        self.quick_btn.pack(fill=tk.X, pady=(10, 2))
+
+        # Right: results / detail ------------------------------------------
+        right = ttk.PanedWindow(body, orient=tk.VERTICAL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        result_frame = ttk.LabelFrame(
+            right, text="提取结果 (双击查看详情)", padding=4
+        )
+        self.q_result_tree = ttk.Treeview(
+            result_frame,
+            columns=("time", "eid", "channel", "computer", "ctx", "file"),
+            show="headings",
+            height=10,
+        )
+        for col, text, width in (
+            ("time", "时间 (UTC)", 160),
+            ("eid", "事件ID", 70),
+            ("channel", "通道", 110),
+            ("computer", "主机", 120),
+            ("ctx", "内容片段", 420),
+            ("file", "文件", 140),
+        ):
+            self.q_result_tree.heading(col, text=text)
+            self.q_result_tree.column(col, width=width, anchor=tk.W)
+        self.q_result_tree.pack(fill=tk.BOTH, expand=True)
+        self.q_result_tree.bind(
+            "<<TreeviewSelect>>", self._on_select_quick_result
+        )
+        right.add(result_frame, weight=3)
+
+        detail_frame = ttk.LabelFrame(right, text="记录详情", padding=4)
+        btns = ttk.Frame(detail_frame)
+        btns.pack(fill=tk.X)
+        ttk.Button(
+            btns, text="复制命中片段", command=self._copy_quick_context
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            btns, text="复制完整记录", command=self._copy_quick_content
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            btns, text="导出 JSON", command=lambda: self._export(_TAB_QUICK, "json")
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            btns, text="导出 CSV", command=lambda: self._export(_TAB_QUICK, "csv")
+        ).pack(side=tk.RIGHT, padx=4)
+        self.q_detail = self._make_detail_text(detail_frame)
+        right.add(detail_frame, weight=3)
+
+    @staticmethod
+    def _make_detail_text(parent: ttk.Frame) -> tk.Text:
+        """Consolas detail viewer with a vertical scrollbar."""
+        text = tk.Text(
+            parent, height=8, wrap=tk.NONE, state=tk.DISABLED,
+            font=("Consolas", 9),
+        )
+        ysb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=ysb.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        return text
 
     # ------------------------------------------------------------- import
 
@@ -298,26 +422,39 @@ class FlagHunterApp:
 
     # --------------------------------------------------------------- scan
 
+    def _on_quick_selected(self, _event: Any = None) -> None:
+        """Show the selected quick-query description under the combo box."""
+        query = self._quick_map[self.quick_var.get()]
+        self.quick_desc_var.set(query.description)
+
+    def _run_quick_query(self) -> None:
+        """One-click DFIR extraction from the quick tab."""
+        query = self._quick_map[self.quick_var.get()]
+        split = lambda text: [t for t in text.replace(",", " ").split() if t]
+        eids = list(query.eids) + split(self.q_ent_eid.get())
+        top = int(self.q_ent_top.get() or 0)
+        config = ScanConfig(
+            paths=[entry.path for entry in self.entries],
+            eid_filter=eids,
+            eid_match=True,  # EID is the match criterion, not a pre-filter
+            auto_decode=False,  # pure EID extraction needs no decoding
+            nested=False,
+            context=60,
+            top=top,
+        )
+        hint = f"[{query.label}] {query.description}" if query.description else ""
+        self.status_var.set(hint)
+        self._launch_scan(config, _TAB_QUICK)
+
     def _start_scan(self) -> None:
-        """One-click scan entry point (zero configuration required)."""
-        if self._scanning:
-            return
+        """One-click flag scan entry point (zero configuration required)."""
         if not self.entries:
             messagebox.showinfo("提示", "请先拖入或添加 .evtx 文件")
             return
-        config = self._build_config()
-        self._clear_results()
-        self._scanning = True
-        self.scan_btn.state(["disabled"])
-        self.progress.configure(value=0, mode="determinate")
-        self.status_var.set("扫描中...")
-
-        scanner = Scanner(config)
-        self._events, _thread = scanner.start_async()
-        self.root.after(80, self._poll_events)
+        self._launch_scan(self._build_config(), _TAB_FLAG)
 
     def _build_config(self) -> ScanConfig:
-        """Collect widget state into a ScanConfig."""
+        """Collect flag-tab widget state into a ScanConfig."""
         split = lambda text: [t for t in text.replace(",", " ").split() if t]
         return ScanConfig(
             paths=[entry.path for entry in self.entries],
@@ -335,6 +472,22 @@ class FlagHunterApp:
             since=self.ent_since.get().strip(),
             until=self.ent_until.get().strip(),
         )
+
+    def _launch_scan(self, config: ScanConfig, kind: str) -> None:
+        """Start one scan and route its events to the requesting tab."""
+        if self._scanning:
+            return
+        self._scan_kind = kind
+        self._clear_results(kind)
+        self._scanning = True
+        self.scan_btn.state(["disabled"])
+        self.quick_btn.state(["disabled"])
+        self.progress.configure(value=0, mode="determinate")
+        self.status_var.set("扫描中...")
+
+        scanner = Scanner(config)
+        self._events, _thread = scanner.start_async()
+        self.root.after(80, self._poll_events)
 
     def _poll_events(self) -> None:
         """Drain the scanner event queue on the UI thread."""
@@ -366,14 +519,10 @@ class FlagHunterApp:
             )
         elif event == EV_HIT:
             hit: RecordHit = payload
-            self.hits.append(hit)
-            ctx = hit.extracted or hit.context
-            self.result_tree.insert(
-                "", tk.END,
-                values=(hit.event_time, hit.event_id, hit.channel,
-                        ",".join(hit.matched_keywords), ctx,
-                        Path(hit.file).name),
-            )
+            if self._scan_kind == _TAB_QUICK:
+                self._append_quick_hit(hit)
+            else:
+                self._append_flag_hit(hit)
         elif event == EV_FILE_DONE:
             entry = payload
             self._update_file_row(entry)
@@ -389,7 +538,11 @@ class FlagHunterApp:
                 f"完成: {summary['files']} 文件, {summary['records']} 记录, "
                 f"{summary['hits']} 命中"
             )
-            if not summary["hits"] and not self.var_nested.get():
+            if (
+                not summary["hits"]
+                and self._scan_kind == _TAB_FLAG
+                and not self.var_nested.get()
+            ):
                 status += (
                     " | 提示: flag 可能藏在 Base64/Hex 编码中，"
                     "请勾选『嵌套解码匹配』后重扫"
@@ -398,6 +551,27 @@ class FlagHunterApp:
             self._finish_scan()
         elif event == EV_ERROR:
             self.status_var.set(f"错误: {payload}")
+
+    def _append_flag_hit(self, hit: RecordHit) -> None:
+        """Add one hit to the flag tab result table."""
+        self.hits.append(hit)
+        ctx = hit.extracted or hit.context
+        self.result_tree.insert(
+            "", tk.END,
+            values=(hit.event_time, hit.event_id, hit.channel,
+                    ",".join(hit.matched_keywords), ctx,
+                    Path(hit.file).name),
+        )
+
+    def _append_quick_hit(self, hit: RecordHit) -> None:
+        """Add one hit to the quick tab result table."""
+        self.quick_hits.append(hit)
+        ctx = hit.extracted or hit.context
+        self.q_result_tree.insert(
+            "", tk.END,
+            values=(hit.event_time, hit.event_id, hit.channel, hit.computer,
+                    ctx, Path(hit.file).name),
+        )
 
     def _update_file_row(self, entry: FileEntry) -> None:
         for existing in self.entries:
@@ -420,24 +594,31 @@ class FlagHunterApp:
     def _finish_scan(self) -> None:
         self._scanning = False
         self.scan_btn.state(["!disabled"])
+        self.quick_btn.state(["!disabled"])
 
-    def _clear_results(self) -> None:
+    def _clear_results(self, kind: str) -> None:
+        """Clear the result widgets of *kind* before a new scan."""
+        if kind == _TAB_QUICK:
+            self.quick_hits.clear()
+            self.q_result_tree.delete(*self.q_result_tree.get_children())
+            self._set_text(self.q_detail, "")
+            return
         self.hits.clear()
         self.result_tree.delete(*self.result_tree.get_children())
-        self.detail.configure(state=tk.NORMAL)
-        self.detail.delete("1.0", tk.END)
-        self.detail.configure(state=tk.DISABLED)
+        self._set_text(self.detail, "")
+
+    @staticmethod
+    def _set_text(widget: tk.Text, content: str) -> None:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, content)
+        widget.configure(state=tk.DISABLED)
 
     # -------------------------------------------------------------- detail
 
-    def _on_select_result(self, _event: Any) -> None:
-        selection = self.result_tree.selection()
-        if not selection:
-            return
-        index = self.result_tree.index(selection[0])
-        if index >= len(self.hits):
-            return
-        hit = self.hits[index]
+    @staticmethod
+    def _render_hit_lines(hit: RecordHit) -> list[str]:
+        """Human-readable detail lines shared by both tabs."""
         lines = [
             f"时间:   {hit.event_time}",
             f"事件ID: {hit.event_id}    通道: {hit.channel}",
@@ -454,10 +635,26 @@ class FlagHunterApp:
             lines.append(f"解码:   {span}")
         lines.append("-" * 60)
         lines.append(hit.content)
-        self.detail.configure(state=tk.NORMAL)
-        self.detail.delete("1.0", tk.END)
-        self.detail.insert(tk.END, "\n".join(lines))
-        self.detail.configure(state=tk.DISABLED)
+        return lines
+
+    def _show_hit(self, widget: tk.Text, hit: RecordHit) -> None:
+        self._set_text(widget, "\n".join(self._render_hit_lines(hit)))
+
+    def _on_select_result(self, _event: Any) -> None:
+        selection = self.result_tree.selection()
+        if not selection:
+            return
+        index = self.result_tree.index(selection[0])
+        if index < len(self.hits):
+            self._show_hit(self.detail, self.hits[index])
+
+    def _on_select_quick_result(self, _event: Any) -> None:
+        selection = self.q_result_tree.selection()
+        if not selection:
+            return
+        index = self.q_result_tree.index(selection[0])
+        if index < len(self.quick_hits):
+            self._show_hit(self.q_detail, self.quick_hits[index])
 
     def _copy_context(self) -> None:
         selection = self.result_tree.selection()
@@ -476,10 +673,28 @@ class FlagHunterApp:
             self.root.clipboard_append(hit.content)
             self.status_var.set("已复制完整记录")
 
+    def _copy_quick_context(self) -> None:
+        selection = self.q_result_tree.selection()
+        if selection:
+            hit = self.quick_hits[self.q_result_tree.index(selection[0])]
+            text = hit.extracted or hit.context
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set("已复制命中片段")
+
+    def _copy_quick_content(self) -> None:
+        selection = self.q_result_tree.selection()
+        if selection:
+            hit = self.quick_hits[self.q_result_tree.index(selection[0])]
+            self.root.clipboard_clear()
+            self.root.clipboard_append(hit.content)
+            self.status_var.set("已复制完整记录")
+
     # -------------------------------------------------------------- export
 
-    def _export(self, fmt: str) -> None:
-        if not self.hits:
+    def _export(self, kind: str, fmt: str) -> None:
+        hits = self.quick_hits if kind == _TAB_QUICK else self.hits
+        if not hits:
             messagebox.showinfo("提示", "当前没有可导出的结果")
             return
         path = filedialog.asksaveasfilename(
@@ -489,11 +704,11 @@ class FlagHunterApp:
         if not path:
             return
         try:
-            out = exporter.export(self.hits, path, fmt)
+            out = exporter.export(hits, path, fmt)
         except (OSError, ValueError) as exc:
             messagebox.showerror("导出失败", str(exc))
             return
-        self.status_var.set(f"已导出 {len(self.hits)} 条 -> {out}")
+        self.status_var.set(f"已导出 {len(hits)} 条 -> {out}")
 
 
 def run_gui() -> None:

@@ -44,6 +44,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extract", default=None,
                         help="custom extraction regex")
     parser.add_argument("--eid", nargs="*", default=[], help="event ID filter")
+    parser.add_argument("--quick", default=None, metavar="NAME",
+                        help="one-click DFIR query, e.g. rdp-login, "
+                             "sched-task, log-clear ('list' shows all)")
     parser.add_argument("--channel", nargs="*", default=[])
     parser.add_argument("--since", default="", help="RFC3339 lower bound")
     parser.add_argument("--until", default="", help="RFC3339 upper bound")
@@ -69,9 +72,41 @@ def _print_hit(hit: RecordHit, index: int) -> None:
         print(f"    decoded: {span.render()}")
 
 
+def _print_quick_list() -> None:
+    """Print the one-click query registry (mirrors the GUI combo box)."""
+    from evtx_flaghunter.quick_queries import QUICK_QUERIES
+
+    print("available quick queries:")
+    for query in QUICK_QUERIES.values():
+        print(f"  {query.name:<16} {query.label}  {query.eids}")
+        if query.description:
+            print(f"  {'':<16} # {query.description}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code."""
     args = build_arg_parser().parse_args(argv)
+    if args.quick == "list":
+        _print_quick_list()
+        return 0
+
+    keywords = args.keywords
+    regexes = args.regexes
+    eids = args.eid
+    if args.quick:
+        from evtx_flaghunter.quick_queries import (
+            get_query,
+            apply_query,
+        )
+
+        try:
+            query = get_query(args.quick)
+        except KeyError:
+            print(f"[!] unknown quick query {args.quick!r} "
+                  f"(use --quick list)", file=sys.stderr)
+            return 2
+        keywords, regexes, eids = apply_query(keywords, regexes, eids, query)
+
     if args.gui or not args.paths:
         from evtx_flaghunter.gui import run_gui
 
@@ -80,8 +115,8 @@ def main(argv: list[str] | None = None) -> int:
 
     config = ScanConfig(
         paths=args.paths,
-        keywords=args.keywords,
-        regex_patterns=args.regexes,
+        keywords=keywords,
+        regex_patterns=regexes,
         preset=args.preset,
         preset_file=args.preset_file,
         ignore_case=not args.exact_case,
@@ -91,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
         decode_chain=args.decode_chain,
         context=args.context,
         top=args.top,
-        eid_filter=args.eid,
+        eid_filter=eids,
+        eid_match=bool(args.quick),
         channel_filter=args.channel,
         since=args.since,
         until=args.until,

@@ -67,6 +67,7 @@ class ScanConfig:
     context: int = 40
     top: int = 0  # 0 = unlimited
     eid_filter: list[str] = field(default_factory=list)
+    eid_match: bool = False  # True = EID filter is the match itself (quick queries)
     channel_filter: list[str] = field(default_factory=list)
     since: str = ""
     until: str = ""
