@@ -7,6 +7,6 @@ third-party scripts share one implementation.
 from evtx_flaghunter.model import RecordHit, ScanConfig
 from evtx_flaghunter.scanner import Scanner
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["RecordHit", "ScanConfig", "Scanner", "__version__"]

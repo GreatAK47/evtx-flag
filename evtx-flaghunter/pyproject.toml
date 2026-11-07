@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evtx-flaghunter"
-version = "0.1.0"
+version = "0.2.0"
 description = "EVTX-FlagHunter: CTF-oriented Windows Event Log (.evtx) keyword hunter with GUI"
 readme = "README.md"
 requires-python = ">=3.10"
