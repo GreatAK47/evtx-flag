@@ -71,8 +71,10 @@ QUICK_QUERIES: dict[str, QuickQuery] = {
     "firewall-rule": QuickQuery(
         name="firewall-rule",
         label="防火墙规则 添加/修改/删除",
-        eids=("4946", "4947", "4948", "5024", "5025"),
-        description="4946 详情含规则名称与方向(Inbound/Outbound)",
+        eids=("4946", "4947", "4948", "2003", "2004", "2005", "2006",
+              "5024", "5025"),
+        description="4946-4948=Security审计版；2004/2005/2006=Firewall通道"
+                    "规则添加/修改/删除，2003=配置文件设置更改(开关防火墙)",
     ),
     "audit-policy": QuickQuery(
         name="audit-policy",

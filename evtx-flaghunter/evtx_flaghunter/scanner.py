@@ -24,11 +24,22 @@ from evtx_flaghunter.detect import (
     detect_file,
 )
 from evtx_flaghunter.evt_parser import iter_evt_records
-from evtx_flaghunter.extract import enrich_hit as quick_enrich
+from evtx_flaghunter.extract import (
+    _account,
+    enrich_hit as quick_enrich,
+    get_field,
+    parse_event_data,
+)
 from evtx_flaghunter.matcher import Matcher
 from evtx_flaghunter.model import FileEntry, RecordHit, ScanConfig
 from evtx_flaghunter.parser import Record, iter_records
 from evtx_flaghunter.presets import resolve_patterns
+
+#: Event IDs carrying user SID/name pairs used to build the SID map.
+_SID_SOURCE_EIDS = {
+    "4624", "4625", "4648", "4688", "4720", "4722", "4724", "4726",
+    "4728", "4732", "4740", "4756",
+}
 
 EmitFn = Callable[[str, object], None]
 
@@ -105,6 +116,21 @@ class Scanner:
     def __init__(self, config: ScanConfig) -> None:
         self.config = config
         self._temp_dir = ""
+        # SID -> DOMAIN\user map built while scanning (quick-query mode only).
+        self.sid_map: dict[str, str] = {}
+
+    def _collect_sid(self, xml: str) -> None:
+        """Record user SID/name pairs from logon & account events."""
+        fields = parse_event_data(xml)
+        for sid_field, name_field in (
+            ("TargetUserSid", "TargetUserName"),
+            ("SubjectUserSid", "SubjectUserName"),
+        ):
+            sid = get_field(fields, sid_field)
+            if sid:
+                name = _account(fields, name_field)
+                if name and name not in {"(空)", "-"}:
+                    self.sid_map[sid] = name
 
     # -- public API --------------------------------------------------------
 
@@ -206,6 +232,11 @@ class Scanner:
 
             if self.config.top and entry.hits >= self.config.top:
                 break
+            # SID sources are collected before the EID filter so that e.g. a
+            # firewall-only quick query can still resolve ModifyingUser SIDs
+            # from 4624/4688 records (P1: SID -> account mapping).
+            if self.config.eid_match and record.event_id in _SID_SOURCE_EIDS:
+                self._collect_sid(record.xml)
             if not self._pass_filters(record):
                 continue
 

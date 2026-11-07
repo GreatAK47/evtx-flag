@@ -302,10 +302,80 @@ def _r_firewall(action: str) -> Callable[[dict[str, str]], str]:
     return render
 
 
+#: Firewall.evtx 2003-2006 (Windows Firewall With Advanced Security channel).
+_FIREWALL_DIRECTION = {"1": "入站", "2": "出站"}
+#: IANA protocol numbers seen in firewall events (256 = wildcard "any").
+_FIREWALL_PROTOCOLS = {
+    "1": "ICMP", "6": "TCP", "17": "UDP", "47": "GRE", "58": "ICMPv6",
+    "256": "任意(Any)",
+}
+
+#: Well-known audit subcategory GUIDs (4719/4739). Curated high-confidence
+#: entries only — unknown GUIDs fall back to the raw value. All share the
+#: suffix ``-69ae-11d9-bed3-505054503030``.
+_AUDIT_SUBCATEGORIES = {
+    "0cce9210": "凭据验证 (Credential Validation)",
+    "0cce9215": "登录 (Logon)",
+    "0cce9216": "注销 (Logoff)",
+    "0cce9217": "账户锁定 (Account Lockout)",
+    "0cce921a": "其他登录/注销事件 (Other Logon/Logoff Events)",
+    "0cce921b": "特殊登录 (Special Logon)",
+    "0cce9227": "其他对象访问事件 (Other Object Access Events)",
+}
+
+
+def audit_subcategory_name(guid: str) -> str:
+    """Translate an audit subcategory GUID to its policy name."""
+    key = (guid or "").strip("{}").split("-")[0].lower()
+    return _AUDIT_SUBCATEGORIES.get(key, guid or "?")
+
+
+def _r_firewall_evt(action: str) -> Callable[[dict[str, str]], str]:
+    """Firewall.evtx renderer: plain-tag RuleName/ApplicationPath fields."""
+
+    def render(f: dict[str, str]) -> str:
+        name = get_field(f, "RuleName") or "(未命名规则)"
+        text = f"防火墙规则{action}: {name}"
+        actor = get_field(f, "ModifyingUser")
+        if actor and actor != "-":
+            text += f"（操作者 {actor}）"
+        app = get_field(f, "ApplicationPath") or get_field(
+            f, "ModifyingApplication"
+        )
+        if app:
+            text += f" | 应用: {app}"
+        direction = get_field(f, "Direction")
+        if direction:
+            text += f" | 方向: {_FIREWALL_DIRECTION.get(direction, direction)}"
+        protocol = get_field(f, "Protocol")
+        if protocol:
+            text += (
+                f" | 协议: {_FIREWALL_PROTOCOLS.get(protocol, protocol)}"
+            )
+        ports = get_field(f, "LocalPorts")
+        if ports and ports != "*":
+            text += f" | 本地端口: {ports}"
+        remote_ports = get_field(f, "RemotePorts")
+        if remote_ports and remote_ports != "*":
+            text += f" | 远端端口: {remote_ports}"
+        return text
+
+    return render
+
+
+def _r_2003(f: dict[str, str]) -> str:
+    profile = get_field(f, "Profiles") or get_field(f, "Profile")
+    text = "防火墙配置文件设置已更改"
+    if profile:
+        text += f"（Profile {profile}）"
+    return text
+
+
 def _r_4719(f: dict[str, str]) -> str:
+    guid = get_field(f, "SubcategoryGuid")
     return (
-        f"审核策略更改（操作者 {_account(f, 'SubjectUserName')}，"
-        f"子类别 {get_field(f, 'SubcategoryGuid') or '?'}）"
+        f"审核策略更改：{audit_subcategory_name(guid)}"
+        f"（操作者 {_account(f, 'SubjectUserName')}）"
     )
 
 
@@ -321,7 +391,9 @@ def _r_104(f: dict[str, str]) -> str:
 def _r_defender_detect(f: dict[str, str]) -> str:
     threat = get_field(f, "ThreatName") or get_field(f, "Threat Name") or "?"
     severity = get_field(f, "SeverityName") or get_field(f, "Severity Name")
-    path = get_field(f, "Path") or get_field(f, "Path Name")
+    path = _clean_defender_path(
+        get_field(f, "Path") or get_field(f, "Path Name")
+    )
     text = f"Defender 检测到威胁 {threat}"
     if severity:
         text += f"（严重度 {severity}）"
@@ -330,10 +402,22 @@ def _r_defender_detect(f: dict[str, str]) -> str:
     return text
 
 
+def _clean_defender_path(path: str) -> str:
+    """Strip Defender ``file:_``/``web:_`` resource prefixes from paths."""
+    if ":_" in path:
+        scheme, _, rest = path.partition(":_")
+        return rest or path
+    return path
+
+
 def _r_defender_action(kind: str) -> Callable[[dict[str, str]], str]:
     def render(f: dict[str, str]) -> str:
         threat = get_field(f, "ThreatName") or get_field(f, "Threat Name")
-        return f"Defender {kind}: {threat or '?'}"
+        action = get_field(f, "ActionName") or get_field(f, "Action Name")
+        text = f"Defender {kind}"
+        if action:
+            text += f"({action})"
+        return f"{text}: {threat or '?'}"
 
     return render
 
@@ -436,6 +520,10 @@ RENDERERS: dict[str, Callable[[dict[str, str]], str]] = {
     "4946": _r_firewall("添加"),
     "4947": _r_firewall("修改"),
     "4948": _r_firewall("删除"),
+    "2003": _r_2003,
+    "2004": _r_firewall_evt("添加"),
+    "2005": _r_firewall_evt("修改"),
+    "2006": _r_firewall_evt("删除"),
     "4719": _r_4719,
     "1102": _r_1102,
     "104": _r_104,
@@ -537,3 +625,142 @@ def enrich_hit(hit: RecordHit) -> None:
     renderer = RENDERERS.get(hit.event_id)
     hit.summary = renderer(fields) if renderer else ""
     hit.suspicious = assess_suspicious(hit.event_id, fields)
+
+
+def rerender_hit(hit: RecordHit) -> None:
+    """Re-run renderer + suspicion rules on (possibly mutated) fields."""
+    renderer = RENDERERS.get(hit.event_id)
+    hit.summary = renderer(hit.fields) if renderer else ""
+    hit.suspicious = assess_suspicious(hit.event_id, hit.fields)
+
+
+# -- scan-finished post-processing (P1) -----------------------------------------
+# Quick-query hits are buffered by the GUI, which allows cross-record passes
+# once EV_DONE fires: PowerShell fragment reassembly / noise dedup, SID
+# resolution and per-key aggregation.
+
+_SID_FIELDS = ("modifyinguser", "membersid", "subjectusersid", "targetusersid")
+
+
+def apply_sid_map(hits: list[RecordHit], sid_map: dict[str, str]) -> None:
+    """Replace SIDs in hit fields with resolved ``DOMAIN\\user`` names."""
+    if not sid_map:
+        return
+    for hit in hits:
+        changed = False
+        for key, value in list(hit.fields.items()):
+            if key.lower() in _SID_FIELDS and value in sid_map:
+                hit.fields[key] = sid_map[value]
+                changed = True
+        if changed:
+            rerender_hit(hit)
+
+
+def postprocess_powershell(hits: list[RecordHit]) -> list[RecordHit]:
+    """Reassemble fragmented 4104 script blocks and drop repeat noise.
+
+    Module auto-logging repeats identical script blocks and splits long ones
+    across ``MessageNumber``/``MessageTotal`` fragments. Fragments sharing a
+    ``(ScriptBlockId, Path)`` key are joined into the earliest hit; identical
+    repeats beyond the first are dropped as noise.
+    """
+    groups: dict[tuple[str, str], list[RecordHit]] = {}
+    for hit in hits:
+        if hit.event_id == "4104":
+            key = (
+                get_field(hit.fields, "ScriptBlockId"),
+                get_field(hit.fields, "Path"),
+            )
+            groups.setdefault(key, []).append(hit)
+
+    drop: set[int] = set()
+    for group in groups.values():
+        unique: list[RecordHit] = []
+        seen: set[str] = set()
+        for hit in sorted(group, key=lambda h: h.event_time):
+            text = get_field(hit.fields, "ScriptBlockText")
+            if text and text in seen:
+                drop.add(id(hit))
+                continue
+            seen.add(text)
+            unique.append(hit)
+        if len(unique) <= 1:
+            continue
+        try:
+            total = int(get_field(unique[0].fields, "MessageTotal") or 1)
+        except ValueError:
+            total = 1
+        if total > 1:
+            carrier = unique[0]
+            carrier.fields = dict(carrier.fields)
+            carrier.fields["ScriptBlockText"] = " ".join(
+                get_field(h.fields, "ScriptBlockText") for h in unique
+            )
+            rerender_hit(carrier)
+            for hit in unique[1:]:
+                drop.add(id(hit))
+    return [hit for hit in hits if id(hit) not in drop]
+
+
+def aggregate_quick_stats(hits: list[RecordHit]) -> list[str]:
+    """Per-key aggregation answering "first/who/which" style questions."""
+    logons: dict[str, list[str]] = {}  # user -> [first, last, count]
+    failures: dict[tuple[str, str], list] = {}  # (user, ip) -> [count, last]
+    cleared: list[str] = []
+    tasks: list[str] = []
+    services = 0
+    threats: set[str] = set()
+    for hit in hits:
+        f = hit.fields
+        eid = hit.event_id
+        time = hit.event_time[:19]
+        if eid == "4624":
+            user = _account(f)
+            entry = logons.setdefault(user, [time, time, 0])
+            entry[0] = min(entry[0], time)
+            entry[1] = max(entry[1], time)
+            entry[2] += 1
+        elif eid == "4625":
+            user = get_field(f, "TargetUserName") or "(空)"
+            ip = _ip(f, "IpAddress") or "-"
+            entry = failures.setdefault((user, ip), [0, time])
+            entry[0] += 1
+            entry[1] = max(entry[1], time)
+        elif eid in {"1102", "104"}:
+            cleared.append(
+                f"{time} {_account(f, 'SubjectUserName')} 清除 "
+                f"{get_field(f, 'Channel') or 'Security'} 日志"
+            )
+        elif eid == "4698":
+            name = get_field(f, "TaskName") or get_field(f, "TargetName")
+            if name:
+                tasks.append(f"{time} 创建任务 {name}")
+        elif eid == "7045":
+            services += 1
+        elif eid in {"1116", "1117"}:
+            threat = get_field(f, "ThreatName") or get_field(f, "Threat Name")
+            if threat:
+                threats.add(threat)
+
+    lines: list[str] = []
+    if logons:
+        total = sum(count for _, _, count in logons.values())
+        lines.append(f"[登录统计] 共 {total} 次成功登录：")
+        for user, (first, last, count) in sorted(
+            logons.items(), key=lambda kv: kv[1][0]
+        ):
+            lines.append(f"  {user}: 首次 {first} / 最后 {last} / {count} 次")
+    if failures:
+        lines.append(f"[登录失败] 共 {len(failures)} 个 (用户,来源) 组合，Top5：")
+        top = sorted(failures.items(), key=lambda kv: -kv[1][0])[:5]
+        for (user, ip), (count, last) in top:
+            lines.append(f"  {user} ← {ip}: {count} 次，最近 {last}")
+    for line in cleared:
+        lines.append(f"[日志清除] {line}")
+    for line in tasks:
+        lines.append(f"[计划任务] {line}")
+    if services:
+        lines.append(f"[新服务] 安装 {services} 个服务")
+    for threat in sorted(threats):
+        lines.append(f"[杀软告警] {threat}")
+    return lines

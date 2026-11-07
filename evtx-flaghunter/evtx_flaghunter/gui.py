@@ -28,6 +28,11 @@ from evtx_flaghunter.detect import detect_file
 from evtx_flaghunter.model import FileEntry, RecordHit, ScanConfig
 from evtx_flaghunter.presets import PRESETS
 from evtx_flaghunter.quick_queries import QUICK_QUERIES, QuickQuery
+from evtx_flaghunter.extract import (
+    aggregate_quick_stats,
+    apply_sid_map,
+    postprocess_powershell,
+)
 from evtx_flaghunter.scanner import (
     EV_DONE,
     EV_ERROR,
@@ -52,6 +57,22 @@ _TAB_FLAG = "flag"
 _TAB_QUICK = "quick"
 
 
+def _attach_scrollbars(
+    container: ttk.Frame, tree: ttk.Treeview, horizontal: bool = True
+) -> None:
+    """Pack draggable scrollbars around *tree* (vertical always, optional X)."""
+    ysb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=tree.yview)
+    tree.configure(yscrollcommand=ysb.set)
+    ysb.pack(side=tk.RIGHT, fill=tk.Y)
+    if horizontal:
+        xsb = ttk.Scrollbar(
+            container, orient=tk.HORIZONTAL, command=tree.xview
+        )
+        tree.configure(xscrollcommand=xsb.set)
+        xsb.pack(side=tk.BOTTOM, fill=tk.X)
+    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+
 class FlagHunterApp:
     """Main application window (two-tab notebook)."""
 
@@ -63,6 +84,7 @@ class FlagHunterApp:
         self._events: Any = None
         self._scanning = False
         self._scan_kind = _TAB_FLAG  # routes events to the owning tab
+        self._scanner: Scanner | None = None  # kept for sid_map after EV_DONE
         self._temp_dirs: list[str] = []
         self._build_ui()
         # Only a TkinterDnD-enabled root supports drop targets; a plain
@@ -191,7 +213,7 @@ class FlagHunterApp:
         ):
             self.file_tree.heading(col, text=text)
             self.file_tree.column(col, width=width, anchor=tk.W)
-        self.file_tree.pack(fill=tk.BOTH, expand=True)
+        _attach_scrollbars(file_frame, self.file_tree)
         right.add(file_frame, weight=2)
 
         result_frame = ttk.LabelFrame(right, text="检索结果 (双击查看详情)", padding=4)
@@ -211,7 +233,7 @@ class FlagHunterApp:
         ):
             self.result_tree.heading(col, text=text)
             self.result_tree.column(col, width=width, anchor=tk.W)
-        self.result_tree.pack(fill=tk.BOTH, expand=True)
+        _attach_scrollbars(result_frame, self.result_tree)
         self.result_tree.bind("<<TreeviewSelect>>", self._on_select_result)
         right.add(result_frame, weight=3)
 
@@ -272,6 +294,12 @@ class FlagHunterApp:
         ttk.Label(left, text="补充事件ID (可选, 空格分隔):").pack(anchor=tk.W)
         self.q_ent_eid = ttk.Entry(left, width=28)
         self.q_ent_eid.pack(fill=tk.X, pady=2)
+        ttk.Label(left, text="时间范围 since (UTC, 可选):").pack(anchor=tk.W, pady=(6, 0))
+        self.q_ent_since = ttk.Entry(left, width=28)
+        self.q_ent_since.pack(fill=tk.X, pady=2)
+        ttk.Label(left, text="时间范围 until (UTC, 可选):").pack(anchor=tk.W, pady=(6, 0))
+        self.q_ent_until = ttk.Entry(left, width=28)
+        self.q_ent_until.pack(fill=tk.X, pady=2)
         ttk.Label(left, text="最多输出条数:").pack(anchor=tk.W, pady=(6, 0))
         self.q_ent_top = ttk.Spinbox(left, from_=0, to=100000, width=10)
         self.q_ent_top.set(0)
@@ -307,7 +335,7 @@ class FlagHunterApp:
         self.q_result_tree.tag_configure(
             "suspicious", foreground="#c00000"
         )
-        self.q_result_tree.pack(fill=tk.BOTH, expand=True)
+        _attach_scrollbars(result_frame, self.q_result_tree)
         self.q_result_tree.bind(
             "<<TreeviewSelect>>", self._on_select_quick_result
         )
@@ -443,6 +471,8 @@ class FlagHunterApp:
             nested=False,
             context=60,
             top=top,
+            since=self.q_ent_since.get().strip(),
+            until=self.q_ent_until.get().strip(),
         )
         hint = f"[{query.label}] {query.description}" if query.description else ""
         self.status_var.set(hint)
@@ -488,6 +518,7 @@ class FlagHunterApp:
         self.status_var.set("扫描中...")
 
         scanner = Scanner(config)
+        self._scanner = scanner  # kept for sid_map after EV_DONE
         self._events, _thread = scanner.start_async()
         self.root.after(80, self._poll_events)
 
@@ -550,6 +581,8 @@ class FlagHunterApp:
                     "请勾选『嵌套解码匹配』后重扫"
                 )
             self.status_var.set(status)
+            if self._scan_kind == _TAB_QUICK:
+                self._finalize_quick_hits()
             self._finish_scan()
         elif event == EV_ERROR:
             self.status_var.set(f"错误: {payload}")
@@ -568,6 +601,10 @@ class FlagHunterApp:
     def _append_quick_hit(self, hit: RecordHit) -> None:
         """Add one hit to the quick tab result table (conclusion-first)."""
         self.quick_hits.append(hit)
+        self._render_quick_row(hit)
+
+    def _render_quick_row(self, hit: RecordHit) -> None:
+        """Insert one hit row into the quick tab table."""
         summary = hit.summary or hit.extracted or hit.context
         sus = "⚠ " + "; ".join(hit.suspicious) if hit.suspicious else ""
         self.q_result_tree.insert(
@@ -576,6 +613,26 @@ class FlagHunterApp:
                     Path(hit.file).name),
             tags=("suspicious",) if hit.suspicious else (),
         )
+
+    def _finalize_quick_hits(self) -> None:
+        """Post-process quick hits once EV_DONE fires (P1).
+
+        Reassembles fragmented 4104 script blocks, drops repeat noise,
+        resolves SIDs to account names, then refreshes the table and shows
+        per-key aggregation stats in the detail pane.
+        """
+        self.quick_hits = postprocess_powershell(self.quick_hits)
+        sid_map = getattr(self._scanner, "sid_map", {})
+        apply_sid_map(self.quick_hits, sid_map)
+        self.q_result_tree.delete(*self.q_result_tree.get_children())
+        for hit in self.quick_hits:
+            self._render_quick_row(hit)
+        stats = aggregate_quick_stats(self.quick_hits)
+        if stats:
+            self._set_text(
+                self.q_detail,
+                "=== 聚合统计 ===\n" + "\n".join(stats) + "\n",
+            )
 
     def _update_file_row(self, entry: FileEntry) -> None:
         for existing in self.entries:
