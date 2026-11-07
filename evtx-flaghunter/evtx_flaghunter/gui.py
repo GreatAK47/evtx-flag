@@ -291,20 +291,22 @@ class FlagHunterApp:
         )
         self.q_result_tree = ttk.Treeview(
             result_frame,
-            columns=("time", "eid", "channel", "computer", "ctx", "file"),
+            columns=("time", "eid", "summary", "sus", "file"),
             show="headings",
             height=10,
         )
         for col, text, width in (
             ("time", "时间 (UTC)", 160),
             ("eid", "事件ID", 70),
-            ("channel", "通道", 110),
-            ("computer", "主机", 120),
-            ("ctx", "内容片段", 420),
+            ("summary", "结论 / 用户名", 380),
+            ("sus", "可疑原因", 200),
             ("file", "文件", 140),
         ):
             self.q_result_tree.heading(col, text=text)
             self.q_result_tree.column(col, width=width, anchor=tk.W)
+        self.q_result_tree.tag_configure(
+            "suspicious", foreground="#c00000"
+        )
         self.q_result_tree.pack(fill=tk.BOTH, expand=True)
         self.q_result_tree.bind(
             "<<TreeviewSelect>>", self._on_select_quick_result
@@ -564,13 +566,15 @@ class FlagHunterApp:
         )
 
     def _append_quick_hit(self, hit: RecordHit) -> None:
-        """Add one hit to the quick tab result table."""
+        """Add one hit to the quick tab result table (conclusion-first)."""
         self.quick_hits.append(hit)
-        ctx = hit.extracted or hit.context
+        summary = hit.summary or hit.extracted or hit.context
+        sus = "⚠ " + "; ".join(hit.suspicious) if hit.suspicious else ""
         self.q_result_tree.insert(
             "", tk.END,
-            values=(hit.event_time, hit.event_id, hit.channel, hit.computer,
-                    ctx, Path(hit.file).name),
+            values=(hit.event_time, hit.event_id, summary, sus,
+                    Path(hit.file).name),
+            tags=("suspicious",) if hit.suspicious else (),
         )
 
     def _update_file_row(self, entry: FileEntry) -> None:
@@ -627,6 +631,15 @@ class FlagHunterApp:
             f"关键词: {', '.join(hit.matched_keywords)}  "
             f"字段: {hit.match_field}  层: {hit.match_layer}",
         ]
+        if hit.summary:
+            lines.append(f"结论:   {hit.summary}")
+        if hit.suspicious:
+            lines.append(f"可疑:   {'; '.join(hit.suspicious)}")
+        if hit.fields:
+            pairs = "  ".join(
+                f"{key}={value}" for key, value in hit.fields.items() if value
+            )
+            lines.append(f"字段:   {pairs}")
         if hit.extracted:
             lines.append(f"提取:   {hit.extracted}")
         if hit.context:
@@ -677,10 +690,10 @@ class FlagHunterApp:
         selection = self.q_result_tree.selection()
         if selection:
             hit = self.quick_hits[self.q_result_tree.index(selection[0])]
-            text = hit.extracted or hit.context
+            text = hit.summary or hit.extracted or hit.context
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
-            self.status_var.set("已复制命中片段")
+            self.status_var.set("已复制结论" if hit.summary else "已复制命中片段")
 
     def _copy_quick_content(self) -> None:
         selection = self.q_result_tree.selection()

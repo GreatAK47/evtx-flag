@@ -19,6 +19,8 @@ CSV_FIELDS = [
     "match_field",
     "match_layer",
     "extracted",
+    "summary",
+    "suspicious",
     "context",
     "decoded",
     "file",
@@ -40,6 +42,9 @@ def hit_to_dict(hit: RecordHit) -> dict[str, object]:
         "match_field": hit.match_field,
         "match_layer": hit.match_layer,
         "extracted": hit.extracted,
+        "summary": hit.summary,
+        "suspicious": hit.suspicious,
+        "fields": hit.fields,
         "context": hit.context,
         "decoded": [
             {
@@ -77,6 +82,7 @@ def export_csv(hits: list[RecordHit], path: str | Path) -> None:
         for hit in hits:
             row = {field: getattr(hit, field) for field in CSV_FIELDS}
             row["matched_keywords"] = ",".join(hit.matched_keywords)
+            row["suspicious"] = "; ".join(hit.suspicious)
             row["decoded"] = "; ".join(span.render() for span in hit.decoded)
             writer.writerow(row)
 

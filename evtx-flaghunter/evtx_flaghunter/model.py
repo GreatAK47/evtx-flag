@@ -48,6 +48,11 @@ class RecordHit:
     context: str = ""
     decoded: list[DecodedSpan] = field(default_factory=list)
     content: str = ""
+    # Quick-query enrichment (方向一/四): structured EventData fields, a
+    # human-readable one-line conclusion and heuristic suspicion reasons.
+    summary: str = ""
+    fields: dict[str, str] = field(default_factory=dict)
+    suspicious: list[str] = field(default_factory=list)
 
 
 @dataclass

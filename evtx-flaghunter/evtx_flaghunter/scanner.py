@@ -24,6 +24,7 @@ from evtx_flaghunter.detect import (
     detect_file,
 )
 from evtx_flaghunter.evt_parser import iter_evt_records
+from evtx_flaghunter.extract import enrich_hit as quick_enrich
 from evtx_flaghunter.matcher import Matcher
 from evtx_flaghunter.model import FileEntry, RecordHit, ScanConfig
 from evtx_flaghunter.parser import Record, iter_records
@@ -237,10 +238,13 @@ class Scanner:
             # Quick-query mode: the event ID filter IS the match criterion,
             # so every pre-filtered record is emitted as a hit.
             pos = _first_eventdata_pos(xml)
-            return self._build_hit(
+            hit = self._build_hit(
                 record, matcher, [f"eid:{record.event_id}"], "plain", [],
                 pos=pos,
             )
+            # 方向一/四: structured fields + conclusion + suspicion reasons.
+            quick_enrich(hit)
+            return hit
 
         keywords = matcher.matched_keywords(xml)
         regex_hits = matcher.find_regex(xml)

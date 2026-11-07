@@ -67,6 +67,10 @@ def _print_hit(hit: RecordHit, index: int) -> None:
     flag = f"  flag: {hit.extracted}" if hit.extracted else ""
     print(f"#{index}  {hit.event_time}  EID={hit.event_id}  "
           f"{hit.channel}  [{','.join(hit.matched_keywords)}]{flag}")
+    if hit.summary:
+        print(f"    summary: {hit.summary}")
+    if hit.suspicious:
+        print(f"    suspicious: {'; '.join(hit.suspicious)}")
     print(f"    {hit.context}")
     for span in hit.decoded:
         print(f"    decoded: {span.render()}")
