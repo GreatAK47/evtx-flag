@@ -21,6 +21,10 @@ venv/
 .idea/
 .vscode/
 
+# Local sample logs / test suite (kept out of the public repo)
+samples/
+tests/
+
 # Local scan outputs
 export/
 result.json
