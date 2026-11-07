@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evtx-flaghunter"
+version = "0.1.0"
+description = "EVTX-FlagHunter: CTF-oriented Windows Event Log (.evtx) keyword hunter with GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "evtx>=0.8",
+    "pyahocorasick>=2.0",
+    "tkinterdnd2>=0.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+evtxflaghunt = "evtx_flaghunter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["evtx_flaghunter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,4 @@
+evtx>=0.8
+pyahocorasick>=2.0
+tkinterdnd2>=0.4
+pytest>=8.0

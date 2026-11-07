@@ -1,0 +1,27 @@
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging / virtualenvs
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Local scan outputs
+export/
+result.json
+result.csv
