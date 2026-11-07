@@ -17,6 +17,7 @@ RecordHit` slots, GUI/CLI/exporters only render them.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from html import unescape as _xml_unescape
 from typing import Callable
 
@@ -562,6 +563,15 @@ def _token_hit(text: str, tokens: tuple[str, ...]) -> str | None:
     return None
 
 
+#: Tokens that make a firewall rule name/path stand out in CTF scenarios.
+_FIREWALL_RULE_SUSPICIOUS_TOKENS = (
+    "metasploit", "meterpreter", "c2", "bypass", "tunnel", "reverse",
+    "nc.exe", "ncat", "cobalt", "beacon", "persist",
+)
+#: Ports commonly used by C2 frameworks.
+_COMMON_C2_PORTS = {"4444", "4443", "1337", "8888", "5555"}
+
+
 def assess_suspicious(eid: str, fields: dict[str, str]) -> list[str]:
     """Return heuristic red-flag reasons for one event (方向四)."""
     reasons: list[str] = []
@@ -609,6 +619,24 @@ def assess_suspicious(eid: str, fields: dict[str, str]) -> list[str]:
         reasons.append("账户被锁定（可能由爆破触发）")
     elif eid == "5001":
         reasons.append("Defender 实时防护被关闭")
+    elif eid in {"2004", "2005", "2006"}:
+        text = get_field(fields, "RuleName") or ""
+        app = get_field(fields, "ApplicationPath") or get_field(
+            fields, "ModifyingApplication"
+        )
+        token = _token_hit(f"{text} {app or ''}",
+                           _FIREWALL_RULE_SUSPICIOUS_TOKENS)
+        if token:
+            reasons.append(f"防火墙规则名称/路径含可疑词（{token.strip()}）")
+        remote = get_field(fields, "RemotePorts") or ""
+        if any(port in remote.split(",")
+               for port in _COMMON_C2_PORTS if port):
+            reasons.append(f"放行常见C2端口 {remote}")
+    elif eid == "4719":
+        subject = _account(fields, "SubjectUserName")
+        if subject and not subject.endswith("$") \
+                and subject.upper() != "SYSTEM":
+            reasons.append("非系统账户修改审核策略（可能隐藏痕迹）")
 
     # Generic cross-scenario rule: a flag pattern hidden in any field value.
     for value in fields.values():
@@ -763,4 +791,85 @@ def aggregate_quick_stats(hits: list[RecordHit]) -> list[str]:
         lines.append(f"[新服务] 安装 {services} 个服务")
     for threat in sorted(threats):
         lines.append(f"[杀软告警] {threat}")
+    return lines
+
+
+# -- cross-record correlation (P2 / 方向三 MVP) ----------------------------------
+#: A source is "brute force" once it accumulates this many failures.
+_BRUTE_MIN_FAILURES = 3
+#: A success logon within N minutes after the last failure is suspicious.
+_CORR_WINDOW_MINUTES = 30
+#: Activity restarting within N minutes after a log clear is suspicious.
+_CLEAR_PROXIMITY_MINUTES = 5
+
+
+def _parse_ts(value: str) -> datetime | None:
+    """Parse ISO event timestamps; ``None`` on malformed input."""
+    try:
+        return datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def correlate_quick_hits(hits: list[RecordHit]) -> list[str]:
+    """Timeline correlations: brute-force→success and clear→activity."""
+    logons = [h for h in hits if h.event_id == "4624"]
+    clears = [h for h in hits if h.event_id in {"1102", "104"}]
+    activity = [
+        h for h in hits
+        if h.event_id in {"4624", "4625", "4688", "7045", "4698", "4104"}
+    ]
+    lines: list[str] = []
+
+    groups: dict[tuple[str, str], list[datetime]] = {}
+    for hit in hits:
+        if hit.event_id != "4625":
+            continue
+        ts = _parse_ts(hit.event_time)
+        if ts is None:
+            continue
+        user = get_field(hit.fields, "TargetUserName") or "-"
+        ip = _ip(hit.fields, "IpAddress") or "-"
+        groups.setdefault((user, ip), []).append(ts)
+    for (user, ip), times in groups.items():
+        if len(times) < _BRUTE_MIN_FAILURES:
+            continue
+        last = max(times)
+        for hit in logons:
+            lts = _parse_ts(hit.event_time)
+            if lts is None:
+                continue
+            luser = _account(hit.fields).split("\\")[-1]
+            if user != "-" and luser.lower() != user.lower():
+                continue
+            lip = _ip(hit.fields, "IpAddress")
+            if ip != "-" and lip and lip != ip:
+                continue
+            delta = (lts - last).total_seconds() / 60
+            if 0 <= delta <= _CORR_WINDOW_MINUTES:
+                lines.append(
+                    f"⚠ 疑似爆破成功：{user} ← {ip} 失败 {len(times)} 次，"
+                    f"{delta:.0f} 分钟后成功登录"
+                )
+                break
+
+    for hit in clears:
+        cts = _parse_ts(hit.event_time)
+        if cts is None:
+            continue
+        for act in activity:
+            ats = _parse_ts(act.event_time)
+            if ats is None or ats <= cts:
+                continue
+            delta = (ats - cts).total_seconds() / 60
+            if delta <= _CLEAR_PROXIMITY_MINUTES:
+                who = (
+                    _account(act.fields, "SubjectUserName")
+                    or _account(act.fields)
+                )
+                lines.append(
+                    f"⚠ 日志清除后 {delta:.0f} 分钟内仍有活动"
+                    f"（{who or act.event_id}）"
+                )
+                break
     return lines

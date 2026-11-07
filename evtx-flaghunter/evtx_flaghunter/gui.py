@@ -31,6 +31,7 @@ from evtx_flaghunter.quick_queries import QUICK_QUERIES, QuickQuery
 from evtx_flaghunter.extract import (
     aggregate_quick_stats,
     apply_sid_map,
+    correlate_quick_hits,
     postprocess_powershell,
 )
 from evtx_flaghunter.scanner import (
@@ -301,6 +302,11 @@ class FlagHunterApp:
         self.q_ent_until = ttk.Entry(left, width=28)
         self.q_ent_until.pack(fill=tk.X, pady=2)
         ttk.Label(left, text="最多输出条数:").pack(anchor=tk.W, pady=(6, 0))
+        self.q_sort_time = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            left, text="完成后按时间排序（时间线视图）",
+            variable=self.q_sort_time,
+        ).pack(anchor=tk.W, pady=(6, 0))
         self.q_ent_top = ttk.Spinbox(left, from_=0, to=100000, width=10)
         self.q_ent_top.set(0)
         self.q_ent_top.pack(anchor=tk.W, pady=2)
@@ -624,10 +630,18 @@ class FlagHunterApp:
         self.quick_hits = postprocess_powershell(self.quick_hits)
         sid_map = getattr(self._scanner, "sid_map", {})
         apply_sid_map(self.quick_hits, sid_map)
+        if self.q_sort_time.get():
+            self.quick_hits.sort(
+                key=lambda h: (h.event_time, h.file, h.record_id)
+            )
         self.q_result_tree.delete(*self.q_result_tree.get_children())
         for hit in self.quick_hits:
             self._render_quick_row(hit)
         stats = aggregate_quick_stats(self.quick_hits)
+        corr = correlate_quick_hits(self.quick_hits)
+        if corr:
+            stats.append("[关联分析]")
+            stats.extend(corr)
         if stats:
             self._set_text(
                 self.q_detail,
