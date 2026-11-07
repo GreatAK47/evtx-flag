@@ -124,11 +124,19 @@ class Scanner:
                 self._temp_dir = ""
 
     def start_async(self) -> tuple["queue.Queue[tuple[str, object]]", threading.Thread]:
-        """Start the scan on a daemon thread; return ``(queue, thread)``."""
+        """Start the scan on a daemon thread; return ``(queue, thread)``.
+
+        Note: the emit callback must adapt the two-argument ``emit(event,
+        payload)`` interface to a single queued item; passing ``queue.put``
+        directly would turn *payload* into the ``block`` argument and the
+        GUI would silently lose every event.
+        """
         events: "queue.Queue[tuple[str, object]]" = queue.Queue()
-        thread = threading.Thread(
-            target=self._safe_run, args=(events.put,), daemon=True
-        )
+
+        def emit(event: str, payload: object) -> None:
+            events.put((event, payload))
+
+        thread = threading.Thread(target=self._safe_run, args=(emit,), daemon=True)
         thread.start()
         return events, thread
 
@@ -157,6 +165,7 @@ class Scanner:
 
             if detected.fmt == FMT_UNKNOWN:
                 entry.error = detected.note or "unsupported format"
+                summary["files"] += 1
                 emit(EV_FILE_DONE, entry)
                 continue
 

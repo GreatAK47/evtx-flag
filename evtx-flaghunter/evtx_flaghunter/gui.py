@@ -350,13 +350,20 @@ class FlagHunterApp:
     def _handle_event(self, event: str, payload: Any) -> None:
         """Dispatch one scanner event to the UI."""
         if event == EV_TOTAL:
-            self.progress.configure(maximum=int(payload) or 1)
+            self.progress.configure(maximum=int(payload) or 1, value=0)
         elif event == EV_FILE_START:
             entry: FileEntry = payload
+            # Unknown record count: pulse until the file completes.
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(40)
             self.status_var.set(f"扫描中: {Path(entry.path).name}")
         elif event == EV_FILE_PROGRESS:
             entry = payload
             self._update_file_row(entry)
+            self.status_var.set(
+                f"扫描中: {Path(entry.path).name} | "
+                f"已解析 {entry.records} 条, 命中 {entry.hits}"
+            )
         elif event == EV_HIT:
             hit: RecordHit = payload
             self.hits.append(hit)
@@ -370,13 +377,24 @@ class FlagHunterApp:
         elif event == EV_FILE_DONE:
             entry = payload
             self._update_file_row(entry)
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
             self.progress.step(1)
         elif event == EV_DONE:
             summary = payload
-            self.status_var.set(
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
+            self.progress.configure(value=self.progress["maximum"])
+            status = (
                 f"完成: {summary['files']} 文件, {summary['records']} 记录, "
                 f"{summary['hits']} 命中"
             )
+            if not summary["hits"] and not self.var_nested.get():
+                status += (
+                    " | 提示: flag 可能藏在 Base64/Hex 编码中，"
+                    "请勾选『嵌套解码匹配』后重扫"
+                )
+            self.status_var.set(status)
             self._finish_scan()
         elif event == EV_ERROR:
             self.status_var.set(f"错误: {payload}")
