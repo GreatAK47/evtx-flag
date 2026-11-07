@@ -32,8 +32,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="flag|ctf|sqli|ps-enc|webshell|all")
     parser.add_argument("--exact-case", action="store_true",
                         help="case-sensitive matching")
-    parser.add_argument("--nested", action="store_true",
-                        help="decode base64/hex before matching")
+    parser.add_argument("--nested", dest="nested", action="store_true",
+                        default=True,
+                        help="decode base64/hex before matching (default on)")
+    parser.add_argument("--no-nested", dest="nested", action="store_false",
+                        help="disable nested decode matching for speed")
     parser.add_argument("--no-decode", action="store_true",
                         help="disable auto-decode display")
     parser.add_argument("--decode-chain", default=None,

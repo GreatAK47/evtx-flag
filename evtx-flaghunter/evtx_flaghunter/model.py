@@ -61,7 +61,7 @@ class ScanConfig:
     preset_file: str | None = None
     ignore_case: bool = True
     extract: str | None = None
-    nested: bool = False
+    nested: bool = True  # on by default: encoded flags cannot be predicted
     auto_decode: bool = True
     decode_chain: str | None = None
     context: int = 40

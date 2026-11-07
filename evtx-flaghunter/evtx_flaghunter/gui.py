@@ -99,7 +99,7 @@ class FlagHunterApp:
 
         self.var_ignore_case = tk.BooleanVar(value=True)
         self.var_auto_decode = tk.BooleanVar(value=True)
-        self.var_nested = tk.BooleanVar(value=False)
+        self.var_nested = tk.BooleanVar(value=True)
         self.var_skip_broken = tk.BooleanVar(value=False)
 
         for text, var in (
