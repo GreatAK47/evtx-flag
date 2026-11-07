@@ -13,6 +13,7 @@ htmlcov/
 # Packaging / virtualenvs
 build/
 dist/
+*.spec
 *.egg-info/
 .venv/
 venv/
