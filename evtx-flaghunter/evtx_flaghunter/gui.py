@@ -42,6 +42,7 @@ from evtx_flaghunter.extract import (
     eid_histogram,
     postprocess_powershell,
 )
+from evtx_flaghunter.msgtpl import render_body
 from evtx_flaghunter.scanner import (
     EV_DONE,
     EV_ERROR,
@@ -807,8 +808,12 @@ class FlagHunterApp:
     # -------------------------------------------------------------- detail
 
     @staticmethod
-    def _render_hit_lines(hit: RecordHit) -> list[str]:
-        """Human-readable detail lines shared by both tabs."""
+    def _render_hit_lines(hit: RecordHit, show_body: bool = False) -> list[str]:
+        """Human-readable detail lines shared by both tabs.
+
+        *show_body* adds the rendered 常规 body - used by the quick tab
+        only; the flag-hunt tab stays on raw XML + keyword context.
+        """
         lines = [
             f"时间:   {hit.event_time}",
             f"事件ID: {hit.event_id}    通道: {hit.channel}",
@@ -832,12 +837,24 @@ class FlagHunterApp:
             lines.append(f"片段:   {hit.context}")
         for span in hit.decoded:
             lines.append(f"解码:   {span}")
+        if show_body:
+            body = render_body(
+                hit.content, hit.provider, hit.event_id, hit.channel,
+            )
+            if body:
+                lines.append("正文(常规):")
+                lines.append(body)
+                lines.append("-" * 60)
         lines.append("-" * 60)
         lines.append(hit.content)
         return lines
 
-    def _show_hit(self, widget: tk.Text, hit: RecordHit) -> None:
-        self._set_text(widget, "\n".join(self._render_hit_lines(hit)))
+    def _show_hit(
+        self, widget: tk.Text, hit: RecordHit, show_body: bool = False,
+    ) -> None:
+        self._set_text(
+            widget, "\n".join(self._render_hit_lines(hit, show_body)),
+        )
 
     def _on_select_result(self, _event: Any) -> None:
         selection = self.result_tree.selection()
@@ -853,7 +870,7 @@ class FlagHunterApp:
             return
         index = self.q_result_tree.index(selection[0])
         if index < len(self.quick_hits):
-            self._show_hit(self.q_detail, self.quick_hits[index])
+            self._show_hit(self.q_detail, self.quick_hits[index], True)
 
     def _copy_context(self) -> None:
         selection = self.result_tree.selection()
