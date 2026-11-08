@@ -21,6 +21,7 @@ from datetime import datetime
 from html import unescape as _xml_unescape
 from typing import Callable
 
+from evtx_flaghunter.eid_dict import eid_name
 from evtx_flaghunter.model import RecordHit
 
 # -- EventData parsing --------------------------------------------------------
@@ -791,6 +792,36 @@ def aggregate_quick_stats(hits: list[RecordHit]) -> list[str]:
         lines.append(f"[新服务] 安装 {services} 个服务")
     for threat in sorted(threats):
         lines.append(f"[杀软告警] {threat}")
+    return lines
+
+
+#: Event IDs rarer than this in a scan are surfaced first (attack actions
+#: such as log clears or account creation are almost always outliers).
+_RARE_EID_THRESHOLD = 3
+#: How many of the most frequent IDs to show after the rare ones.
+_HISTOGRAM_TOP = 15
+
+
+def eid_histogram(eid_counts: dict[str, int]) -> list[str]:
+    """Frequency profile with rare/high-value IDs surfaced first."""
+    if not eid_counts:
+        return []
+    rare = sorted(
+        (eid, n) for eid, n in eid_counts.items()
+        if n <= _RARE_EID_THRESHOLD
+    )
+    common = sorted(
+        eid_counts.items(), key=lambda kv: (-kv[1], eid_name(kv[0]))
+    )[:_HISTOGRAM_TOP]
+    lines: list[str] = []
+    for eid, count in rare:
+        lines.append(f"  ⚡{eid} {eid_name(eid) or '?'} × {count}")
+    if rare:
+        lines.append("  ―― 以上为稀有事件（≤3 次），通常是攻击动作 ――")
+    for eid, count in common:
+        if count <= _RARE_EID_THRESHOLD:
+            continue
+        lines.append(f"  {eid} {eid_name(eid) or '?'} × {count}")
     return lines
 
 

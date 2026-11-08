@@ -27,11 +27,19 @@ from evtx_flaghunter import exporter
 from evtx_flaghunter.detect import detect_file
 from evtx_flaghunter.model import FileEntry, RecordHit, ScanConfig
 from evtx_flaghunter.presets import PRESETS
-from evtx_flaghunter.quick_queries import QUICK_QUERIES, QuickQuery
+from evtx_flaghunter.quick_queries import (
+    ALL_EIDS,
+    QUICK_QUERIES,
+    QuickQuery,
+    match_scenarios,
+    scenario_counts,
+)
+from evtx_flaghunter.eid_dict import eid_name
 from evtx_flaghunter.extract import (
     aggregate_quick_stats,
     apply_sid_map,
     correlate_quick_hits,
+    eid_histogram,
     postprocess_powershell,
 )
 from evtx_flaghunter.scanner import (
@@ -86,6 +94,7 @@ class FlagHunterApp:
         self._scanning = False
         self._scan_kind = _TAB_FLAG  # routes events to the owning tab
         self._scanner: Scanner | None = None  # kept for sid_map after EV_DONE
+        self._quick_all = False  # True while the emergency all-scan runs
         self._temp_dirs: list[str] = []
         self._build_ui()
         # Only a TkinterDnD-enabled root supports drop targets; a plain
@@ -284,6 +293,16 @@ class FlagHunterApp:
         combo.pack(fill=tk.X, pady=2)
         combo.bind("<<ComboboxSelected>>", self._on_quick_selected)
 
+        # Offline smart search: digits -> EID lookup, words -> scenario.
+        search_row = ttk.Frame(left)
+        search_row.pack(fill=tk.X, pady=(8, 2))
+        self.q_ent_search = ttk.Entry(search_row)
+        self.q_ent_search.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.q_ent_search.bind("<Return>", lambda _e: self._smart_search())
+        ttk.Button(
+            search_row, text="🔎", width=3, command=self._smart_search,
+        ).pack(side=tk.LEFT, padx=2)
+
         self.quick_desc_var = tk.StringVar()
         ttk.Label(
             left, textvariable=self.quick_desc_var, wraplength=200,
@@ -315,6 +334,11 @@ class FlagHunterApp:
             left, text="\u26a1 一键提取", command=self._run_quick_query
         )
         self.quick_btn.pack(fill=tk.X, pady=(10, 2))
+        self.quick_all_btn = ttk.Button(
+            left, text="\U0001F691 应急全扫描 (不知道ID就点这个)",
+            command=self._run_quick_all,
+        )
+        self.quick_all_btn.pack(fill=tk.X, pady=(2, 2))
 
         # Right: results / detail ------------------------------------------
         right = ttk.PanedWindow(body, orient=tk.VERTICAL)
@@ -463,26 +487,73 @@ class FlagHunterApp:
         query = self._quick_map[self.quick_var.get()]
         self.quick_desc_var.set(query.description)
 
-    def _run_quick_query(self) -> None:
-        """One-click DFIR extraction from the quick tab."""
-        query = self._quick_map[self.quick_var.get()]
+    def _quick_config(self, eids: list[str]) -> ScanConfig:
+        """Build a quick-tab ScanConfig for the given event IDs."""
         split = lambda text: [t for t in text.replace(",", " ").split() if t]
-        eids = list(query.eids) + split(self.q_ent_eid.get())
-        top = int(self.q_ent_top.get() or 0)
-        config = ScanConfig(
+        return ScanConfig(
             paths=[entry.path for entry in self.entries],
-            eid_filter=eids,
+            eid_filter=list(dict.fromkeys(eids + split(self.q_ent_eid.get()))),
             eid_match=True,  # EID is the match criterion, not a pre-filter
             auto_decode=False,  # pure EID extraction needs no decoding
             nested=False,
             context=60,
-            top=top,
+            top=int(self.q_ent_top.get() or 0),
             since=self.q_ent_since.get().strip(),
             until=self.q_ent_until.get().strip(),
         )
-        hint = f"[{query.label}] {query.description}" if query.description else ""
+
+    def _run_quick_query(self) -> None:
+        """One-click DFIR extraction from the quick tab."""
+        query = self._quick_map[self.quick_var.get()]
+        self._quick_all = False
+        hint = (
+            f"[{query.label}] {query.description}"
+            if query.description else ""
+        )
         self.status_var.set(hint)
-        self._launch_scan(config, _TAB_QUICK)
+        self._launch_scan(self._quick_config(list(query.eids)), _TAB_QUICK)
+
+    def _run_quick_all(self) -> None:
+        """Emergency mode: union of every scenario in a single pass."""
+        if not self.entries:
+            messagebox.showinfo("提示", "请先拖入或添加 .evtx 文件")
+            return
+        self._quick_all = True
+        self.status_var.set("应急模式：一次扫描覆盖全部预设场景")
+        self._launch_scan(self._quick_config(list(ALL_EIDS)), _TAB_QUICK)
+
+    def _smart_search(self) -> None:
+        """Offline three-way lookup, no model needed (设计方向 D).
+
+        1. Pure digits -> direct event-ID scan.
+        2. Scenario dictionary hit -> select the scenario and scan.
+        3. Otherwise -> jump to the flag tab and run a full-text search.
+        """
+        text = self.q_ent_search.get().strip()
+        if not text:
+            return
+        if not self.entries:
+            messagebox.showinfo("提示", "请先拖入或添加 .evtx 文件")
+            return
+        if text.isdigit():
+            self.status_var.set(
+                f"按事件ID {text} 直查"
+                f"（{eid_name(text) or '词典未收录，将展示原始记录'}）"
+            )
+            self._quick_all = False
+            self._launch_scan(self._quick_config([text]), _TAB_QUICK)
+            return
+        matches = match_scenarios(text)
+        if matches:
+            query = matches[0]
+            self.quick_var.set(f"{query.label} ({query.name})")
+            self._on_quick_selected()
+            self._run_quick_query()
+            return
+        self.ent_keywords.delete(0, tk.END)
+        self.ent_keywords.insert(0, text)
+        self.notebook.select(0)
+        self._start_scan()
 
     def _start_scan(self) -> None:
         """One-click flag scan entry point (zero configuration required)."""
@@ -637,16 +708,28 @@ class FlagHunterApp:
         self.q_result_tree.delete(*self.q_result_tree.get_children())
         for hit in self.quick_hits:
             self._render_quick_row(hit)
+        sections: list[str] = []
+        hist = eid_histogram(
+            dict(getattr(self._scanner, "eid_counts", {}) or {})
+        )
+        if hist:
+            sections.append("[事件ID分布]（⚡=稀有事件，攻击动作通常在此）")
+            sections.extend(hist)
+        if self._quick_all:
+            counts = scenario_counts(self.quick_hits)
+            if counts:
+                sections.append("[场景命中]")
+                sections.extend(counts)
         stats = aggregate_quick_stats(self.quick_hits)
         corr = correlate_quick_hits(self.quick_hits)
         if corr:
             stats.append("[关联分析]")
             stats.extend(corr)
         if stats:
-            self._set_text(
-                self.q_detail,
-                "=== 聚合统计 ===\n" + "\n".join(stats) + "\n",
-            )
+            sections.append("[聚合统计]")
+            sections.extend(stats)
+        if sections:
+            self._set_text(self.q_detail, "\n".join(sections) + "\n")
 
     def _update_file_row(self, entry: FileEntry) -> None:
         for existing in self.entries:

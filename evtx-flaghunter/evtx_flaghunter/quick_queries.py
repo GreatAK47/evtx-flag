@@ -168,3 +168,68 @@ def apply_query(
     merged_regexes = list(dict.fromkeys(list(regexes) + list(query.regexes)))
     merged_eids = list(dict.fromkeys(list(eids) + list(query.eids)))
     return merged_keywords, merged_regexes, merged_eids
+
+
+# -- emergency "all scenarios" mode + offline smart search (no LLM) -------------
+
+#: Chinese/English keyword aliases per query name, keyed in priority order.
+SCENARIO_ALIASES: dict[str, tuple[str, ...]] = {
+    "login-success": ("登录", "登陆", "成功登录", "logon", "首次"),
+    "logon-fail": ("失败", "爆破", "brute", "密码错", "猜解"),
+    "log-clear": ("清日志", "清除日志", "删除日志", "日志清除", "抹除"),
+    "firewall-rule": ("防火墙", "firewall", "放行", "规则"),
+    "audit-policy": ("审核策略", "审计", "策略更改", "策略修改"),
+    "account-change": ("建账", "新建用户", "用户管理", "加组", "账户"),
+    "priv-assign": ("特权", "提权", "管理员", "special"),
+    "sched-task": ("计划任务", "schtasks", "定时任务", "任务"),
+    "service-install": ("服务", "持久化", "后门服务"),
+    "process-create": ("进程", "命令行", "执行命令"),
+    "powershell": ("powershell", "ps1", "脚本", "命令执行"),
+    "rdp-logon": ("远程桌面", "rdp", "3389", "远程登录"),
+    "defender": ("杀软", "defender", "病毒", "木马", "隔离", "告警"),
+    "share-access": ("共享", "smb", "网络访问", "ipc"),
+    "logoff": ("注销", "会话", "断开", "登出"),
+}
+
+
+def match_scenarios(text: str) -> list[QuickQuery]:
+    """Offline scenario lookup: match aliases/labels against *text*.
+
+    Pure string containment, no network or model needed. Returns queries
+    ordered by match score (alias hits), then registry order.
+    """
+    lowered = text.strip().lower()
+    if not lowered:
+        return []
+    scored: list[tuple[int, int, QuickQuery]] = []
+    for order, query in enumerate(QUICK_QUERIES.values()):
+        score = 0
+        for alias in SCENARIO_ALIASES.get(query.name, ()):
+            if alias.lower() in lowered:
+                score += 2
+        if query.label.lower() in lowered:
+            score += 3
+        elif any(word and word.lower() in lowered
+                 for word in query.label.replace("(", " ").split("/")):
+            score += 1
+        if score:
+            scored.append((score, -order, query))
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    return [query for _, _, query in scored]
+
+
+def scenario_counts(hits: list) -> list[str]:
+    """Per-scenario hit counts for the emergency all-scan summary."""
+    eid_to_label: dict[str, str] = {}
+    for query in QUICK_QUERIES.values():
+        for eid in query.eids:
+            eid_to_label.setdefault(eid, query.label)
+    counts: dict[str, int] = {}
+    for hit in hits:
+        label = eid_to_label.get(getattr(hit, "event_id", ""))
+        if label:
+            counts[label] = counts.get(label, 0) + 1
+    return [
+        f"  {label} × {count}"
+        for label, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    ]

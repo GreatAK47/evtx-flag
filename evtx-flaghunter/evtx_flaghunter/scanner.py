@@ -23,6 +23,7 @@ from evtx_flaghunter.detect import (
     FMT_UNKNOWN,
     detect_file,
 )
+from collections import Counter
 from evtx_flaghunter.evt_parser import iter_evt_records
 from evtx_flaghunter.extract import (
     _account,
@@ -118,6 +119,8 @@ class Scanner:
         self._temp_dir = ""
         # SID -> DOMAIN\user map built while scanning (quick-query mode only).
         self.sid_map: dict[str, str] = {}
+        # Event-ID frequency profile for every parsed record (quick mode).
+        self.eid_counts: Counter[str] = Counter()
 
     def _collect_sid(self, xml: str) -> None:
         """Record user SID/name pairs from logon & account events."""
@@ -235,8 +238,10 @@ class Scanner:
             # SID sources are collected before the EID filter so that e.g. a
             # firewall-only quick query can still resolve ModifyingUser SIDs
             # from 4624/4688 records (P1: SID -> account mapping).
-            if self.config.eid_match and record.event_id in _SID_SOURCE_EIDS:
-                self._collect_sid(record.xml)
+            if self.config.eid_match:
+                self.eid_counts[record.event_id] += 1
+                if record.event_id in _SID_SOURCE_EIDS:
+                    self._collect_sid(record.xml)
             if not self._pass_filters(record):
                 continue
 
