@@ -249,7 +249,10 @@ class Scanner:
                 # recognizable even when none of its records matched.
                 if record.computer:
                     self.hosts.add(record.computer)
-                if self._in_time_range(record):
+                if (
+                    not self.config.computer
+                    or self._host_matches(record.computer)
+                ) and self._in_time_range(record):
                     self.eid_counts[record.event_id] += 1
                 if record.event_id in _SID_SOURCE_EIDS:
                     self._collect_sid(record.xml)
@@ -272,9 +275,22 @@ class Scanner:
             return False
         return True
 
+    def _host_matches(self, value: str) -> bool:
+        """Bare-name host match (FQDN-suffix tolerant).
+
+        ``lemon-squeezer`` in the config matches record computer
+        ``lemon-squeezer.art.local`` and vice versa, because CTF answers
+        use either form interchangeably.
+        """
+        needle = (self.config.computer or "").split(".")[0].lower()
+        bare = (value or "").split(".")[0].lower()
+        return bool(needle) and bare == needle
+
     def _pass_filters(self, record: Record) -> bool:
-        """Event ID / channel / time-range pre-filters (design doc FR-5)."""
+        """Event ID / channel / host / time-range pre-filters (FR-5)."""
         config = self.config
+        if config.computer and not self._host_matches(record.computer):
+            return False
         if config.eid_filter and record.event_id not in config.eid_filter:
             return False
         if config.channel_filter and record.channel not in config.channel_filter:

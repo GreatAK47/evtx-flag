@@ -74,6 +74,9 @@ class ScanConfig:
     eid_filter: list[str] = field(default_factory=list)
     eid_match: bool = False  # True = EID filter is the match itself (quick queries)
     channel_filter: list[str] = field(default_factory=list)
+    #: Hostname filter (bare-name tolerant, e.g. "lemon-squeezer" matches
+    #: "lemon-squeezer.art.local"); empty = no host restriction.
+    computer: str = ""
     since: str = ""
     until: str = ""
     skip_broken: bool = False

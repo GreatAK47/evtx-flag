@@ -305,8 +305,9 @@ class FlagHunterApp:
             search_row, text="🔎", width=3, command=self._smart_search,
         ).pack(side=tk.LEFT, padx=2)
         ttk.Label(
-            left, text="智能搜索：数字=按ID查 / 场景词=一键扫描"
-                      "（U盘、勒索、爆破、rdp…）/ 其他词=Flag页全文搜索",
+            left, text="智能搜索：数字=按ID查（如 4720, 4726 7045"
+                       " 多个ID混查）/ 场景词=一键扫描（U盘、勒索、爆破、"
+                       "rdp…）/ 主机名=按主机过滤 / 其他词=Flag页全文搜索",
             wraplength=200, foreground="#777777", justify=tk.LEFT,
         ).pack(fill=tk.X)
 
@@ -368,7 +369,11 @@ class FlagHunterApp:
             ("file", "文件", 140),
         ):
             self.q_result_tree.heading(col, text=text)
-            self.q_result_tree.column(col, width=width, anchor=tk.W)
+            # stretch=False keeps fixed widths so the horizontal scrollbar
+            # actually engages instead of squeezing every column to fit.
+            self.q_result_tree.column(
+                col, width=width, anchor=tk.W, stretch=False,
+            )
         self.q_result_tree.tag_configure(
             "suspicious", foreground="#c00000"
         )
@@ -398,15 +403,20 @@ class FlagHunterApp:
 
     @staticmethod
     def _make_detail_text(parent: ttk.Frame) -> tk.Text:
-        """Consolas detail viewer with a vertical scrollbar."""
+        """Consolas detail viewer with vertical + horizontal scrollbars."""
         text = tk.Text(
             parent, height=8, wrap=tk.NONE, state=tk.DISABLED,
             font=("Consolas", 9),
         )
         ysb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text.yview)
         text.configure(yscrollcommand=ysb.set)
-        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        xsb = ttk.Scrollbar(
+            parent, orient=tk.HORIZONTAL, command=text.xview,
+        )
+        text.configure(xscrollcommand=xsb.set)
         ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        xsb.pack(side=tk.BOTTOM, fill=tk.X)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         return text
 
     # ------------------------------------------------------------- import
@@ -542,13 +552,17 @@ class FlagHunterApp:
         if not self.entries:
             messagebox.showinfo("提示", "请先拖入或添加 .evtx 文件")
             return
-        if text.isdigit():
+        compact = text.replace(",", " ").replace("，", " ").split()
+        if compact and all(item.isdigit() for item in compact):
+            # Custom EID combo: "4720, 4726 7045" -> one multi-ID scan.
+            names = [
+                f"{item}({eid_name(item) or '?'})" for item in compact
+            ]
             self.status_var.set(
-                f"按事件ID {text} 直查"
-                f"（{eid_name(text) or '词典未收录，将展示原始记录'}）"
+                f"自定义事件ID直查: {' '.join(names)}"
             )
             self._quick_all = False
-            self._launch_scan(self._quick_config([text]), _TAB_QUICK)
+            self._launch_scan(self._quick_config(compact), _TAB_QUICK)
             return
         matches = match_scenarios(text)
         if matches:
@@ -559,24 +573,23 @@ class FlagHunterApp:
             self._run_quick_query()
             return
         bare_name = text.split(".")[0].lower()  # FQDN suffix tolerant
-        if any(
+        known = any(
             host.split(".")[0].lower() == bare_name
             for host in self._known_hosts
-        ):
-            self.status_var.set(
-                f"「{text}」是已扫描日志中的主机名：全文搜索命中其 "
-                "<Computer> 字段，结果即该主机的全部事件"
-                "（跨主机数据包时用于区分来源）"
-            )
-        else:
-            self.status_var.set(
-                f"「{text}」未命中场景词典，已转到 Flag 页全文搜索"
-                "（可尝试：U盘/勒索/爆破/rdp/lsass…）"
-            )
-        self.ent_keywords.delete(0, tk.END)
-        self.ent_keywords.insert(0, text)
-        self.notebook.select(0)
-        self._start_scan()
+        )
+        # Host search stays on the quick tab: show every scenario event
+        # from that host via the computer filter (no flag-tab jump).
+        hint = (
+            f"「{text}」是已知主机名：正在显示其全部事件"
+            if known
+            else f"「{text}」未命中场景词典，按主机名过滤扫描"
+                 "（若结果为 0 请先跑一次应急扫描以收集主机名）"
+        )
+        self.status_var.set(hint)
+        self._quick_all = False
+        config = self._quick_config(list(ALL_EIDS))
+        config.computer = text
+        self._launch_scan(config, _TAB_QUICK)
 
     def _start_scan(self) -> None:
         """One-click flag scan entry point (zero configuration required)."""
