@@ -121,6 +121,9 @@ class Scanner:
         self.sid_map: dict[str, str] = {}
         # Event-ID frequency profile for every parsed record (quick mode).
         self.eid_counts: Counter[str] = Counter()
+        # Computer names from the full event stream (quick mode), so the
+        # GUI smart search can recognize hostnames that produced no hits.
+        self.hosts: set[str] = set()
 
     def _collect_sid(self, xml: str) -> None:
         """Record user SID/name pairs from logon & account events."""
@@ -242,6 +245,10 @@ class Scanner:
             # e.g. a firewall-only query can still resolve ModifyingUser
             # SIDs from 4624/4688 records (P1: SID -> account mapping).
             if self.config.eid_match:
+                # Host inventory from the full stream: a hostname must be
+                # recognizable even when none of its records matched.
+                if record.computer:
+                    self.hosts.add(record.computer)
                 if self._in_time_range(record):
                     self.eid_counts[record.event_id] += 1
                 if record.event_id in _SID_SOURCE_EIDS:

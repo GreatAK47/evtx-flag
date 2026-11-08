@@ -680,9 +680,15 @@ class FlagHunterApp:
                     "请勾选『嵌套解码匹配』后重扫"
                 )
             self.status_var.set(status)
+            # Host inventory: prefer the full-stream collection by the
+            # scanner (covers non-matched records), keep the hit-based
+            # update as a fallback for scanners without the hosts attr.
             self._known_hosts.update(
                 hit.computer for hit in (*self.hits, *self.quick_hits)
                 if hit.computer
+            )
+            self._known_hosts.update(
+                getattr(self._scanner, "hosts", ()) or ()
             )
             if self._scan_kind == _TAB_QUICK:
                 self._finalize_quick_hits()
