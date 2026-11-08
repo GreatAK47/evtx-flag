@@ -86,6 +86,15 @@ EID_NAMES: dict[str, str] = {
     "10000": "WMI 活动启动",
     "10001": "WMI 活动启动失败",
     "10005": "DCOM 启动服务",
+    # -- USB / PnP device tracing (应急溯源高频: U盘接入) ------------------
+    "400": "设备配置(Kernel-PnP)",
+    "410": "设备启动(Kernel-PnP)",
+    "430": "设备需进一步安装(Kernel-PnP)",
+    "2003": "设备安装完成(DriverFrameworks)",
+    "6416": "新设备识别(USB溯源)",
+    # -- Volume Shadow Copy (ransomware clues) -----------------------------
+    "8194": "VSS 卷影副本错误(勒索线索)",
+    "8224": "VSS 卷影副本删除(勒索线索)",
     # -- Privilege use / special --------------------------------------
     "4673": "使用特权",
     "4674": "对对象使用特权",
@@ -134,6 +143,28 @@ EID_NAMES: dict[str, str] = {
     "5142": "网络共享对象添加",
     "5144": "共享对象删除(过滤)",
     "5145": "共享详细检查",
+    # -- Kerberos / domain attacks (DC only, lateral movement) -----------
+    "4768": "Kerberos TGT 请求",
+    "4769": "Kerberos 服务票证请求(Kerberoasting)",
+    "4770": "Kerberos 票证重新请求",
+    "4771": "Kerberos 预认证失败(域爆破)",
+    "4772": "Kerberos 预认证失败(账户禁用)",
+    "4776": "NTLM 凭据验证",
+    "4777": "NTLM 凭据验证失败",
+    # -- Object / handle / registry access (credential dumping, ransomware)
+    "4656": "请求对象句柄(凭据转储线索)",
+    "4657": "注册表值修改",
+    "4658": "对象句柄关闭",
+    "4659": "请求删除对象句柄",
+    "4660": "请求删除对象",
+    "4661": "对象句柄查询",
+    "4663": "对象访问尝试",
+    "4664": "删除对象请求",
+    "4697": "安装服务(Security通道)",
+    "4699": "删除计划任务",
+    "4707": "修改信任证书",
+    "4944": "防火墙规则生效",
+    "4964": "特殊组登录",
     # -- Legacy EVT (XP / Server 2003) -----------------------------------
     "528": "成功登录(EVT)",
     "529": "登录失败(EVT)",
@@ -169,9 +200,40 @@ EID_NAMES: dict[str, str] = {
     "682": "会话重连(EVT)",
     "683": "会话断开(EVT)",
     "517": "审核日志被清除(EVT)",
+    # -- Sysmon (separate install, ids overlap other channels; matched via
+    #    the S-prefixed keys only when the record channel is Sysmon) --------
+    "S1": "进程创建(Sysmon)",
+    "S2": "文件时间戳修改(Sysmon)",
+    "S3": "网络连接(Sysmon)",
+    "S7": "镜像加载(Sysmon)",
+    "S8": "CreateRemoteThread注入(Sysmon)",
+    "S9": "原始磁盘访问(Sysmon)",
+    "S10": "进程访问LSASS(Sysmon)",
+    "S11": "文件创建(Sysmon)",
+    "S12": "注册表对象创建(Sysmon)",
+    "S13": "注册表值设置(Sysmon)",
+    "S14": "注册表重命名(Sysmon)",
+    "S15": "ADS备用数据流创建(Sysmon)",
+    "S16": "Sysmon配置变更(Sysmon)",
+    "S17": "命名管道创建(Sysmon)",
+    "S18": "命名管道连接(Sysmon)",
+    "S22": "DNS查询(Sysmon)",
+    "S23": "文件删除归档(Sysmon)",
+    "S25": "进程篡改(空壳注入)(Sysmon)",
+    "S255": "Sysmon错误(Sysmon)",
 }
 
 
-def eid_name(eid: str) -> str:
-    """Return the Chinese name for *eid*, or ``""`` if unknown."""
-    return EID_NAMES.get(str(eid).strip(), "")
+def eid_name(eid: str, channel: str = "") -> str:
+    """Return the Chinese name for *eid*, or ``""`` if unknown.
+
+    When *channel* is a Sysmon channel, the S-prefixed dictionary keys are
+    consulted first so Sysmon events 1/3/11 ... resolve to their distinct
+    meanings instead of colliding with other channels.
+    """
+    key = str(eid).strip()
+    if "sysmon" in (channel or "").lower():
+        name = EID_NAMES.get(f"S{key}")
+        if name:
+            return name
+    return EID_NAMES.get(key, "")

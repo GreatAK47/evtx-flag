@@ -130,6 +130,57 @@ QUICK_QUERIES: dict[str, QuickQuery] = {
         eids=("4672", "4673", "4674", "4732", "4756", "7045"),
         description="特权使用与敏感权限服务安装的组合线索",
     ),
+    "kerberos": QuickQuery(
+        name="kerberos",
+        label="Kerberos 域攻击(TGT/TGS)",
+        eids=("4768", "4769", "4770", "4772", "4773", "4777"),
+        description=(
+            "域控日志：4769 票证请求含 RC4 加密即 Kerberoasting，"
+            "黄金票据伪造则完全没有 4768"
+        ),
+    ),
+    "cred-dump": QuickQuery(
+        name="cred-dump",
+        label="凭据转储线索",
+        eids=("4656", "4657", "4663"),
+        keywords=("mimikatz", "comsvcs", "procdump", "lsass"),
+        description=(
+            "4656 对象句柄请求(ObjectName 含 lsass 即凭据转储)，"
+            "叠加 mimikatz/comsvcs 等工具关键词全文匹配"
+        ),
+    ),
+    "sysmon": QuickQuery(
+        name="sysmon",
+        label="Sysmon 行为链(进程/网络/注册表)",
+        eids=(
+            "1", "2", "3", "7", "8", "9", "10", "11", "12", "13",
+            "15", "16", "17", "18", "22", "23", "25", "255",
+        ),
+        description=(
+            "有 Sysmon 部署的样本优先看：1 进程创建/3 网络外联/"
+            "8 注入/10 访问 lsass/11 落盘/13 Run 键/22 DNS/25 空壳注入"
+        ),
+    ),
+    "usb-device": QuickQuery(
+        name="usb-device",
+        label="USB 设备接入溯源",
+        eids=("400", "410", "430", "6416"),
+        description=(
+            "Kernel-PnP 400/410/430 + 6416 新设备识别"
+            "（DriverFrameworks 2003 与防火墙 2003 同 ID，走防火墙场景），"
+            "U 盘摆渡/数据外带题的入口"
+        ),
+    ),
+    "ransomware": QuickQuery(
+        name="ransomware",
+        label="勒索软件线索",
+        eids=("8194", "8224", "4663"),
+        keywords=("vssadmin", "shadow copy", "shadowcopy", "bcdedit", "wbadmin"),
+        description=(
+            "卷影副本删除(Application 8194/8224) + vssadmin/wbadmin "
+            "命令关键词，大量 4663 批量对象访问配合加密行为"
+        ),
+    ),
 }
 
 #: All event IDs referenced by the registry, de-duplicated (kept sorted).
@@ -174,18 +225,23 @@ def apply_query(
 
 #: Chinese/English keyword aliases per query name, keyed in priority order.
 SCENARIO_ALIASES: dict[str, tuple[str, ...]] = {
-    "login-success": ("登录", "登陆", "成功登录", "logon", "首次"),
+    "rdp-login": ("远程桌面", "rdp", "3389", "远程登录"),
+    "logon-success": ("登录", "登陆", "成功登录", "logon", "首次"),
     "logon-fail": ("失败", "爆破", "brute", "密码错", "猜解"),
     "log-clear": ("清日志", "清除日志", "删除日志", "日志清除", "抹除"),
     "firewall-rule": ("防火墙", "firewall", "放行", "规则"),
     "audit-policy": ("审核策略", "审计", "策略更改", "策略修改"),
     "account-change": ("建账", "新建用户", "用户管理", "加组", "账户"),
-    "priv-assign": ("特权", "提权", "管理员", "special"),
+    "privilege-esc": ("特权", "提权", "管理员", "special"),
+    "kerberos": ("kerberos", "黄金票据", "白银", "kerberoast", "tgt", "tgs", "域控"),
+    "cred-dump": ("凭据", "转储", "mimikatz", "lsass", "抓密码", "抓hash"),
+    "sysmon": ("sysmon", "注入", "外联", "行为链"),
+    "usb-device": ("usb", "u盘", "U盘", "设备接入", "摆渡"),
+    "ransomware": ("勒索", "加密", "影子", "卷影", "vss", "后缀"),
     "sched-task": ("计划任务", "schtasks", "定时任务", "任务"),
     "service-install": ("服务", "持久化", "后门服务"),
     "process-create": ("进程", "命令行", "执行命令"),
     "powershell": ("powershell", "ps1", "脚本", "命令执行"),
-    "rdp-logon": ("远程桌面", "rdp", "3389", "远程登录"),
     "defender": ("杀软", "defender", "病毒", "木马", "隔离", "告警"),
     "share-access": ("共享", "smb", "网络访问", "ipc"),
     "logoff": ("注销", "会话", "断开", "登出"),

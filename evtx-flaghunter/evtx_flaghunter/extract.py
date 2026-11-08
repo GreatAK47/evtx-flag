@@ -496,6 +496,160 @@ def _r_priv_use(f: dict[str, str]) -> str:
     return f"特权调用: {_account(f, 'SubjectUserName')} via {proc or '?'}"
 
 
+# -- Kerberos / credential dumping / USB / Sysmon (应急溯源扩充) -----------------
+
+
+def _r_kerberos(kind: str) -> Callable[[dict[str, str]], str]:
+    def render(f: dict[str, str]) -> str:
+        user = _account(f, "TargetUserName")
+        service = get_field(f, "ServiceName")
+        ip = _ip(f, "IpAddress")
+        enc = get_field(f, "TicketEncryptionType")
+        status = get_field(f, "Status") or get_field(f, "TicketStatus")
+        parts = [f"Kerberos {kind}: {user or '?'}"]
+        if service:
+            parts.append(f"服务 {service}")
+        if ip and ip != "-":
+            parts.append(f"来自 {ip}")
+        if enc:
+            parts.append(f"加密 0x{enc}" if not enc.startswith("0x") else f"加密 {enc}")
+        if status:
+            parts.append(f"状态 {status}")
+        return " | ".join(parts)
+    return render
+
+
+def _r_4656(f: dict[str, str]) -> str:
+    obj = get_field(f, "ObjectName")
+    proc = get_field(f, "ProcessName")
+    return (
+        f"句柄请求: {proc or '?'} → {obj or '?'}"
+        f"（操作者 {_account(f, 'SubjectUserName') or '?'}）"
+    )
+
+
+def _r_4663(f: dict[str, str]) -> str:
+    obj = get_field(f, "ObjectName")
+    proc = get_field(f, "ProcessName")
+    access = get_field(f, "AccessList") or get_field(f, "AccessMask")
+    line = f"对象访问: {proc or '?'} → {obj or '?'}"
+    if access:
+        line += f" | 权限 {access}"
+    return line
+
+
+def _r_4657(f: dict[str, str]) -> str:
+    obj = get_field(f, "ObjectName")
+    old = get_field(f, "OldValue")
+    new = get_field(f, "NewValue")
+    line = f"注册表值修改: {obj or '?'}"
+    if old or new:
+        line += f"（{old or '空'} → {new or '空'}）"
+    return line
+
+
+def _r_pnp(kind: str) -> Callable[[dict[str, str]], str]:
+    def render(f: dict[str, str]) -> str:
+        dev = get_field(f, "DeviceId") or get_field(f, "DeviceInstanceID")
+        desc = get_field(f, "DeviceDescription") or get_field(f, "Description")
+        parts = [f"USB 设备{kind}: {desc or dev or '?'}"]
+        if dev and desc:
+            parts.append(f"ID {dev}")
+        user = _account(f, "SubjectUserName")
+        if user:
+            parts.append(f"操作者 {user}")
+        return " | ".join(parts)
+    return render
+
+
+def _r_sysmon1(f: dict[str, str]) -> str:
+    img = get_field(f, "Image")
+    cmd = get_field(f, "CommandLine")
+    user = get_field(f, "User")
+    parent = get_field(f, "ParentImage")
+    line = f"进程创建: {img or '?'}"
+    if cmd:
+        line += f" | 命令 {cmd}"
+    if parent:
+        line += f" | 父进程 {parent}"
+    if user:
+        line += f" | 用户 {user}"
+    return line
+
+
+def _r_sysmon3(f: dict[str, str]) -> str:
+    img = get_field(f, "Image")
+    dst = get_field(f, "DestinationIp") or get_field(f, "DestinationHostname")
+    port = get_field(f, "DestinationPort")
+    line = f"网络外联: {img or '?'} → {dst or '?'}"
+    if port:
+        line += f":{port}"
+    return line
+
+
+def _r_sysmon10(f: dict[str, str]) -> str:
+    src = get_field(f, "SourceImage")
+    dst = get_field(f, "TargetImage")
+    return f"进程访问: {src or '?'} → {dst or '?'}"
+
+
+def _r_sysmon11(f: dict[str, str]) -> str:
+    return f"文件落盘: {get_field(f, 'TargetFilename') or '?'}（来源 {get_field(f, 'Image') or '?'}）"
+
+
+def _r_sysmon13(f: dict[str, str]) -> str:
+    obj = get_field(f, "TargetObject")
+    details = get_field(f, "Details")
+    line = f"注册表值设置: {obj or '?'}"
+    if details:
+        line += f" = {details}"
+    return line
+
+
+def _r_sysmon22(f: dict[str, str]) -> str:
+    query = get_field(f, "QueryName")
+    img = get_field(f, "Image")
+    return f"DNS 查询: {img or '?'} → {query or '?'}"
+
+
+def _r_sysmon8(f: dict[str, str]) -> str:
+    return (
+        f"远程线程注入: {get_field(f, 'SourceImage') or '?'} → "
+        f"{get_field(f, 'TargetImage') or '?'}"
+    )
+
+
+def _r_sysmon25(f: dict[str, str]) -> str:
+    return (
+        f"进程篡改(疑似空壳注入): {get_field(f, 'SourceImage') or '?'} → "
+        f"{get_field(f, 'TargetImage') or '?'}"
+    )
+
+
+#: Channel-aware aliases: Sysmon events share IDs with other providers, so
+#: when a hit's channel contains "sysmon" the S-prefixed renderer wins.
+SYSMON_RENDERERS: dict[str, Callable[[dict[str, str]], str]] = {
+    "S1": _r_sysmon1,
+    "S2": lambda f: f"文件时间戳修改: {get_field(f, 'TargetFilename') or '?'}（timestomping 线索）",
+    "S3": _r_sysmon3,
+    "S8": _r_sysmon8,
+    "S10": _r_sysmon10,
+    "S11": _r_sysmon11,
+    "S13": _r_sysmon13,
+    "S22": _r_sysmon22,
+    "S25": _r_sysmon25,
+}
+
+
+def _pick_renderer(hit: RecordHit) -> Callable[[dict[str, str]], str] | None:
+    """Channel-aware renderer lookup (Sysmon IDs collide with other channels)."""
+    if "sysmon" in (hit.channel or "").lower():
+        renderer = SYSMON_RENDERERS.get(f"S{hit.event_id}")
+        if renderer:
+            return renderer
+    return RENDERERS.get(hit.event_id)
+
+
 RENDERERS: dict[str, Callable[[dict[str, str]], str]] = {
     "4624": _r_4624,
     "4625": _r_4625,
@@ -551,6 +705,18 @@ RENDERERS: dict[str, Callable[[dict[str, str]], str]] = {
     "5145": _r_share("详细访问"),
     "4673": _r_priv_use,
     "4674": _r_priv_use,
+    # 应急溯源扩充：Kerberos 域攻击 / 凭据转储 / USB 设备
+    "4768": _r_kerberos("TGT 请求"),
+    "4769": _r_kerberos("服务票证请求"),
+    "4770": _r_kerberos("票证重新请求"),
+    "4776": _r_kerberos("NTLM 验证"),
+    "4656": _r_4656,
+    "4657": _r_4657,
+    "4663": _r_4663,
+    "400": _r_pnp("配置"),
+    "410": _r_pnp("启动"),
+    "430": _r_pnp("待装"),
+    "6416": _r_pnp("接入"),
 }
 
 
@@ -605,11 +771,25 @@ def assess_suspicious(eid: str, fields: dict[str, str]) -> list[str]:
                            _SUSPICIOUS_CMD_TOKENS)
         if token:
             reasons.append(f"脚本内容可疑（{token.strip()}）")
+        script = get_field(fields, "ScriptBlockText") or ""
+        if re.search(r"vssadmin\s+.*delete\s+shadows|delete shadows",
+                     script, re.IGNORECASE):
+            reasons.append("删除卷影副本（勒索软件销毁备份动作）")
+        if re.search(r"bcdedit|wbadmin\s+delete", script, re.IGNORECASE):
+            reasons.append("修改启动配置/删除备份（勒索软件动作）")
     elif eid == "4688":
         token = _token_hit(get_field(fields, "CommandLine"),
                            _SUSPICIOUS_CMD_TOKENS)
         if token:
             reasons.append(f"命令行可疑（{token.strip()}）")
+    elif eid == "4769":
+        enc = (get_field(fields, "TicketEncryptionType") or "").lower()
+        if enc.endswith("17") or "rc4" in enc:
+            reasons.append("RC4 加密票证请求（Kerberoasting 特征）")
+    elif eid == "4656":
+        obj = (get_field(fields, "ObjectName") or "").lower()
+        if "lsass" in obj:
+            reasons.append("访问 LSASS 进程（凭据转储特征）")
     elif eid in {"4728", "4732", "4756"}:
         group = (get_field(fields, "TargetUserName") or "").lower()
         if any(name in group for name in _ADMIN_GROUP_TOKENS):
@@ -618,6 +798,11 @@ def assess_suspicious(eid: str, fields: dict[str, str]) -> list[str]:
         reasons.append("事件日志被清除")
     elif eid == "4740":
         reasons.append("账户被锁定（可能由爆破触发）")
+    elif eid == "4719":
+        subject = _account(fields, "SubjectUserName")
+        if subject and not subject.endswith("$") \
+                and subject.upper() != "SYSTEM":
+            reasons.append("非系统账户修改审核策略（可能隐藏痕迹）")
     elif eid == "5001":
         reasons.append("Defender 实时防护被关闭")
     elif eid in {"2004", "2005", "2006"}:
@@ -633,11 +818,6 @@ def assess_suspicious(eid: str, fields: dict[str, str]) -> list[str]:
         if any(port in remote.split(",")
                for port in _COMMON_C2_PORTS if port):
             reasons.append(f"放行常见C2端口 {remote}")
-    elif eid == "4719":
-        subject = _account(fields, "SubjectUserName")
-        if subject and not subject.endswith("$") \
-                and subject.upper() != "SYSTEM":
-            reasons.append("非系统账户修改审核策略（可能隐藏痕迹）")
 
     # Generic cross-scenario rule: a flag pattern hidden in any field value.
     for value in fields.values():
@@ -651,14 +831,14 @@ def enrich_hit(hit: RecordHit) -> None:
     """Fill ``summary`` / ``fields`` / ``suspicious`` on a quick-query hit."""
     fields = parse_event_data(hit.content)
     hit.fields = fields
-    renderer = RENDERERS.get(hit.event_id)
+    renderer = _pick_renderer(hit)
     hit.summary = renderer(fields) if renderer else ""
     hit.suspicious = assess_suspicious(hit.event_id, fields)
 
 
 def rerender_hit(hit: RecordHit) -> None:
     """Re-run renderer + suspicion rules on (possibly mutated) fields."""
-    renderer = RENDERERS.get(hit.event_id)
+    renderer = _pick_renderer(hit)
     hit.summary = renderer(hit.fields) if renderer else ""
     hit.suspicious = assess_suspicious(hit.event_id, hit.fields)
 

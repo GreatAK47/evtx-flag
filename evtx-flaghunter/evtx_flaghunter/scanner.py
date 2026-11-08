@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import threading
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import Callable
 
@@ -23,7 +24,6 @@ from evtx_flaghunter.detect import (
     FMT_UNKNOWN,
     detect_file,
 )
-from collections import Counter
 from evtx_flaghunter.evt_parser import iter_evt_records
 from evtx_flaghunter.extract import (
     _account,
@@ -235,11 +235,15 @@ class Scanner:
 
             if self.config.top and entry.hits >= self.config.top:
                 break
-            # SID sources are collected before the EID filter so that e.g. a
-            # firewall-only quick query can still resolve ModifyingUser SIDs
-            # from 4624/4688 records (P1: SID -> account mapping).
+            # Profile semantics: the histogram counts every record inside
+            # the time range regardless of the EID filter, so it reflects
+            # the whole-file landscape even for a single-scenario query.
+            # SID sources are likewise collected before the EID filter so
+            # e.g. a firewall-only query can still resolve ModifyingUser
+            # SIDs from 4624/4688 records (P1: SID -> account mapping).
             if self.config.eid_match:
-                self.eid_counts[record.event_id] += 1
+                if self._in_time_range(record):
+                    self.eid_counts[record.event_id] += 1
                 if record.event_id in _SID_SOURCE_EIDS:
                     self._collect_sid(record.xml)
             if not self._pass_filters(record):
@@ -251,6 +255,16 @@ class Scanner:
                 summary["hits"] += 1
                 emit(EV_HIT, hit)
 
+    def _in_time_range(self, record: Record) -> bool:
+        """True when the record falls inside the configured since/until."""
+        config = self.config
+        stamp = record.event_time
+        if config.since and stamp < config.since:
+            return False
+        if config.until and stamp > config.until:
+            return False
+        return True
+
     def _pass_filters(self, record: Record) -> bool:
         """Event ID / channel / time-range pre-filters (design doc FR-5)."""
         config = self.config
@@ -258,12 +272,7 @@ class Scanner:
             return False
         if config.channel_filter and record.channel not in config.channel_filter:
             return False
-        stamp = record.event_time
-        if config.since and stamp < config.since:
-            return False
-        if config.until and stamp > config.until:
-            return False
-        return True
+        return self._in_time_range(record)
 
     def _match_record(self, record: Record, matcher: Matcher) -> RecordHit | None:
         """Match one record; returns None when nothing matches."""
