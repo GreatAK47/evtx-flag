@@ -1,16 +1,18 @@
 """Graphical interface - the primary interaction form (design doc 4.2).
 
-Notebook layout with two tabs:
+Notebook layout with three tabs:
 
 * ``Flag 检索`` tab   - the original CTF flag keyword hunt: option panel,
   file list, result table and record detail viewer.
 * ``日志快速查找`` tab - one-click incident-response extractions (RDP
   logins, scheduled task changes, log clearing, ...) driven by the shared
   :mod:`evtx_flaghunter.quick_queries` registry.
+* ``事件ID辞典`` tab  - offline fuzzy keyword -> event-ID lookup table
+  (:mod:`evtx_flaghunter.eid_lookup`); pure reference, never scans logs.
 
-Both tabs share the imported file list (top bar / drag & drop) and the
-bottom status bar. Only one scan runs at a time; scanner events are routed
-to whichever tab started the scan.
+The first two tabs share the imported file list (top bar / drag & drop)
+and the bottom status bar. Only one scan runs at a time; scanner events
+are routed to whichever tab started the scan.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ from evtx_flaghunter.quick_queries import (
     match_scenarios,
     scenario_counts,
 )
+from evtx_flaghunter.eid_lookup import EidEntry, categories as dict_categories
+from evtx_flaghunter.eid_lookup import search as dict_search
 from evtx_flaghunter.eid_dict import eid_name
 from evtx_flaghunter.extract import (
     aggregate_quick_stats,
@@ -65,6 +69,7 @@ except ImportError:  # pragma: no cover - exercised on slim installs
 
 _TAB_FLAG = "flag"
 _TAB_QUICK = "quick"
+_TAB_DICT = "eid-dict"
 
 
 def _attach_scrollbars(
@@ -139,6 +144,7 @@ class FlagHunterApp:
         self.notebook.pack(fill=tk.BOTH, expand=True)
         self._build_flag_tab()
         self._build_quick_tab()
+        self._build_dict_tab()
 
         # Status bar (shared by both tabs) ----------------------------------
         status = ttk.Frame(self.root, padding=4)
@@ -400,6 +406,197 @@ class FlagHunterApp:
         ).pack(side=tk.RIGHT, padx=4)
         self.q_detail = self._make_detail_text(detail_frame)
         right.add(detail_frame, weight=3)
+
+    # -- event-ID dictionary tab (offline reference, never scans) ----------
+
+    def _build_dict_tab(self) -> None:
+        """Fuzzy keyword -> event-ID lookup (eid_lookup dictionary)."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="事件ID辞典 (查ID用)")
+        body = ttk.Frame(tab)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # Left: search controls -------------------------------------------
+        left = ttk.LabelFrame(
+            body, text="模糊关键词查找 (离线辞典, 不扫描日志)", padding=8
+        )
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
+
+        row = ttk.Frame(left)
+        row.pack(fill=tk.X)
+        self.d_ent_search = ttk.Entry(row)
+        self.d_ent_search.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.d_ent_search.bind("<Return>", lambda _e: self._run_dict_search())
+        ttk.Button(
+            row, text="🔍 查找", width=6, command=self._run_dict_search
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(row, text="清空", width=5, command=self._dict_reset).pack(
+            side=tk.LEFT, padx=(4, 0)
+        )
+
+        ttk.Label(
+            left,
+            text="输入中文词（登录/创建用户/清日志/计划任务…）、英文词"
+                 "（logon/process/service/task…）或事件ID（4720）。\n"
+                 "多个词用空格分隔=同时满足；纯数字=按ID精确查询。",
+            wraplength=210, foreground="#777777", justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(6, 6))
+
+        ttk.Label(left, text="按分类过滤:").pack(anchor=tk.W)
+        self.d_cat_var = tk.StringVar(value="全部")
+        combo = ttk.Combobox(
+            left,
+            textvariable=self.d_cat_var,
+            values=["全部", *dict_categories()],
+            width=28,
+            state="readonly",
+        )
+        combo.pack(fill=tk.X, pady=2)
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._run_dict_search())
+
+        self.d_stats_var = tk.StringVar(value="共 0 条")
+        ttk.Label(left, textvariable=self.d_stats_var, foreground="#555555").pack(
+            anchor=tk.W, pady=(6, 0)
+        )
+
+        ttk.Separator(left).pack(fill=tk.X, pady=6)
+        ttk.Button(
+            left, text="📋 复制选中事件ID",
+            command=self._copy_dict_eid,
+        ).pack(fill=tk.X, pady=2)
+        ttk.Button(
+            left, text="🚀 把ID填到快速查找页",
+            command=self._dict_send_to_quick,
+        ).pack(fill=tk.X, pady=2)
+
+        # Right: results / detail ------------------------------------------
+        right = ttk.PanedWindow(body, orient=tk.VERTICAL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        result_frame = ttk.LabelFrame(
+            right, text="查找结果 (单击查看说明)", padding=4
+        )
+        self.d_tree = ttk.Treeview(
+            result_frame,
+            columns=("eid", "channel", "name", "cat", "tags"),
+            show="headings",
+            height=12,
+        )
+        for col, text, width in (
+            ("eid", "事件ID", 90),
+            ("channel", "通道", 140),
+            ("name", "名称 / 含义", 460),
+            ("cat", "分类", 110),
+            ("tags", "搜索标签", 180),
+        ):
+            self.d_tree.heading(col, text=text)
+            self.d_tree.column(col, width=width, anchor=tk.W, stretch=False)
+        _attach_scrollbars(result_frame, self.d_tree)
+        self.d_tree.bind(
+            "<<TreeviewSelect>>", self._on_select_dict_result
+        )
+        right.add(result_frame, weight=3)
+
+        detail_frame = ttk.LabelFrame(right, text="条目说明", padding=4)
+        btns = ttk.Frame(detail_frame)
+        btns.pack(fill=tk.X)
+        ttk.Button(
+            btns, text="复制整行说明", command=self._copy_dict_detail
+        ).pack(side=tk.LEFT)
+        self.d_detail = self._make_detail_text(detail_frame)
+        right.add(detail_frame, weight=2)
+
+        self._dict_entries: list[EidEntry] = []
+        self._dict_reset()
+
+    def _dict_reset(self) -> None:
+        """Clear the search box and show the full dictionary."""
+        self.d_ent_search.delete(0, tk.END)
+        self.d_cat_var.set("全部")
+        self._render_dict_results(dict_search(""))
+
+    def _render_dict_results(self, entries: list[EidEntry]) -> None:
+        """Refresh the dictionary result table."""
+        self._dict_entries = entries
+        self.d_tree.delete(*self.d_tree.get_children())
+        for i, entry in enumerate(entries):
+            self.d_tree.insert(
+                "", tk.END, iid=str(i),
+                values=(entry.eid, entry.channel, entry.name,
+                        entry.category, entry.tags),
+            )
+        self.d_stats_var.set(f"共 {len(entries)} 条匹配")
+
+    def _run_dict_search(self) -> None:
+        """Run the fuzzy lookup for the current keyword + category filter."""
+        entries = dict_search(
+            self.d_ent_search.get(), self.d_cat_var.get()
+        )
+        self._render_dict_results(entries)
+        if not entries:
+            self.status_var.set(
+                "辞典无匹配：换个更短/更通用的关键词，或直接输入事件ID"
+            )
+        else:
+            self.status_var.set(f"辞典查找完成: {len(entries)} 条")
+
+    def _on_select_dict_result(self, _event: Any) -> None:
+        selection = self.d_tree.selection()
+        if not selection:
+            return
+        index = int(selection[0])
+        if index >= len(self._dict_entries):
+            return
+        entry = self._dict_entries[index]
+        lines = [
+            f"事件ID: {entry.eid}",
+            f"通道:   {entry.channel}",
+            f"分类:   {entry.category}",
+            f"名称:   {entry.name}",
+            f"标签:   {entry.tags}",
+            "",
+            "提示: 本页为离线参考辞典。拿到ID后去「日志快速查找」页扫描,"
+            "或在智能搜索框直接输入该ID。",
+        ]
+        self._set_text(self.d_detail, "\n".join(lines) + "\n")
+
+    def _copy_dict_eid(self) -> None:
+        selection = self.d_tree.selection()
+        if not selection:
+            return
+        entry = self._dict_entries[int(selection[0])]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(entry.eid)
+        self.status_var.set(f"已复制事件ID {entry.eid}")
+
+    def _copy_dict_detail(self) -> None:
+        selection = self.d_tree.selection()
+        if not selection:
+            return
+        entry = self._dict_entries[int(selection[0])]
+        text = (
+            f"{entry.eid} | {entry.channel} | {entry.category} | "
+            f"{entry.name}"
+        )
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_var.set("已复制条目说明")
+
+    def _dict_send_to_quick(self) -> None:
+        """Push the current result IDs into the quick tab's EID box."""
+        if not self._dict_entries:
+            messagebox.showinfo("提示", "请先查找并选中至少一条辞典条目")
+            return
+        eids = [e.eid for e in self._dict_entries if e.eid.isdigit()]
+        if not eids:
+            messagebox.showinfo("提示", "当前结果均为通道别名(如 Sysmon), 请换用数字ID")
+            return
+        self.q_ent_eid.delete(0, tk.END)
+        self.q_ent_eid.insert(0, " ".join(dict.fromkeys(eids)))
+        self.notebook.select(1)
+        self.status_var.set(
+            f"已把 {len(dict.fromkeys(eids))} 个事件ID填入快速查找页补充ID框"
+        )
 
     @staticmethod
     def _make_detail_text(parent: ttk.Frame) -> tk.Text:
