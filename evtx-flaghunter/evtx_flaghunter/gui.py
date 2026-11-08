@@ -95,6 +95,7 @@ class FlagHunterApp:
         self._scan_kind = _TAB_FLAG  # routes events to the owning tab
         self._scanner: Scanner | None = None  # kept for sid_map after EV_DONE
         self._quick_all = False  # True while the emergency all-scan runs
+        self._known_hosts: set[str] = set()  # computers seen in past scans
         self._temp_dirs: list[str] = []
         self._build_ui()
         # Only a TkinterDnD-enabled root supports drop targets; a plain
@@ -302,6 +303,11 @@ class FlagHunterApp:
         ttk.Button(
             search_row, text="🔎", width=3, command=self._smart_search,
         ).pack(side=tk.LEFT, padx=2)
+        ttk.Label(
+            left, text="智能搜索：数字=按ID查 / 场景词=一键扫描"
+                      "（U盘、勒索、爆破、rdp…）/ 其他词=Flag页全文搜索",
+            wraplength=200, foreground="#777777", justify=tk.LEFT,
+        ).pack(fill=tk.X)
 
         self.quick_desc_var = tk.StringVar()
         ttk.Label(
@@ -546,10 +552,26 @@ class FlagHunterApp:
         matches = match_scenarios(text)
         if matches:
             query = matches[0]
+            self.status_var.set(f"智能搜索命中场景「{query.label}」，开始扫描")
             self.quick_var.set(f"{query.label} ({query.name})")
             self._on_quick_selected()
             self._run_quick_query()
             return
+        bare_name = text.split(".")[0].lower()  # FQDN suffix tolerant
+        if any(
+            host.split(".")[0].lower() == bare_name
+            for host in self._known_hosts
+        ):
+            self.status_var.set(
+                f"「{text}」是已扫描日志中的主机名：全文搜索命中其 "
+                "<Computer> 字段，结果即该主机的全部事件"
+                "（跨主机数据包时用于区分来源）"
+            )
+        else:
+            self.status_var.set(
+                f"「{text}」未命中场景词典，已转到 Flag 页全文搜索"
+                "（可尝试：U盘/勒索/爆破/rdp/lsass…）"
+            )
         self.ent_keywords.delete(0, tk.END)
         self.ent_keywords.insert(0, text)
         self.notebook.select(0)
@@ -658,6 +680,10 @@ class FlagHunterApp:
                     "请勾选『嵌套解码匹配』后重扫"
                 )
             self.status_var.set(status)
+            self._known_hosts.update(
+                hit.computer for hit in (*self.hits, *self.quick_hits)
+                if hit.computer
+            )
             if self._scan_kind == _TAB_QUICK:
                 self._finalize_quick_hits()
             self._finish_scan()
